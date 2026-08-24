@@ -2046,6 +2046,18 @@
                         <input type="number" id="max_concurrent_activations" min="1" step="1" class="asset-input" placeholder="1">
                         <p style="font-size: 13px; color: var(--text-dim); margin-top: 10px;">超过该数量时，前台将提示「当前任务过多，请稍后再试」。</p>
                     </div>
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-top:22px;">
+                        <div class="form-group" style="margin:0;">
+                            <label>单卡最多绑定订阅数</label>
+                            <input type="number" id="card_max_subscription_count" min="1" max="100" step="1" class="asset-input" placeholder="2">
+                            <p style="font-size:14px; color:var(--text-dim); margin-top:8px;">达到上限后保留记录并停止选用。</p>
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label>单卡最多明确拒付次数</label>
+                            <input type="number" id="card_max_decline_count" min="1" max="100" step="1" class="asset-input" placeholder="3">
+                            <p style="font-size:14px; color:var(--text-dim); margin-top:8px;">仅 card declined 类失败计数并报废。</p>
+                        </div>
+                    </div>
                     <div class="form-group" style="margin-top: 22px;">
                         <div class="toggle-field">
                             <div class="toggle-label">
@@ -2771,7 +2783,8 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                                 <th width="110px">支付姓名</th>
                                 <th>绑定地址</th>
                                 <th width="90px" style="text-align:center">状态</th>
-                                <th width="80px" style="text-align:center">次数</th>
+                                <th width="90px" style="text-align:center">成功订阅</th>
+                                <th width="80px" style="text-align:center">拒付</th>
                                 <th width="140px" style="text-align:center">最近使用</th>
                                 <th width="80px" style="text-align:center">操作</th>
                             </tr>
@@ -5102,6 +5115,14 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
             if (maxConcurrentEl) {
                 maxConcurrentEl.value = cfg.max_concurrent_activations || 1;
             }
+            const cardMaxSubscriptionEl = document.getElementById('card_max_subscription_count');
+            if (cardMaxSubscriptionEl) {
+                cardMaxSubscriptionEl.value = cfg.card_max_subscription_count;
+            }
+            const cardMaxDeclineEl = document.getElementById('card_max_decline_count');
+            if (cardMaxDeclineEl) {
+                cardMaxDeclineEl.value = cfg.card_max_decline_count;
+            }
             loadTelegramConfig(data.telegram || {});
             loadHcaptchaConfig(data.hcaptcha || {});
             lastMaintenanceModeValue = Boolean(cfg.maintenance_mode);
@@ -5832,6 +5853,8 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         function buildConfigPayload(overrides = {}) {
             return {
                 max_concurrent_activations: Math.max(1, parseInt(document.getElementById('max_concurrent_activations').value, 10) || 1),
+                card_max_subscription_count: Math.max(1, Math.min(100, parseInt(document.getElementById('card_max_subscription_count').value, 10) || 2)),
+                card_max_decline_count: Math.max(1, Math.min(100, parseInt(document.getElementById('card_max_decline_count').value, 10) || 3)),
                 maintenance_mode: Object.prototype.hasOwnProperty.call(overrides, 'maintenance_mode')
                     ? Boolean(overrides.maintenance_mode)
                     : document.getElementById('maintenance_mode').checked
@@ -6179,7 +6202,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         function renderCardPoolTable() {
             const tbody = document.getElementById('card_pool_list_body');
             if (cardPoolList.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color: var(--text-dim); padding: 40px 0;">暂无卡片，请使用批量导入添加</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" style="text-align:center; color: var(--text-dim); padding: 40px 0;">暂无卡片，请使用批量导入添加</td></tr>';
                 lucide.createIcons();
                 return;
             }
@@ -6191,6 +6214,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 const paymentHolder = escapeHtml(card.payment_holder_name || '-');
                 const boundAddress = escapeHtml(formatBoundAddress(card));
                 const usageCount = Number(card.usage_count || 0);
+                const declineCount = Number(card.decline_count || 0);
                 const lastUsed = card.last_used_at ? formatTimeShort(card.last_used_at) : '-';
                 const statusBadge = getCardStatusBadge(card);
                 return `
@@ -6203,6 +6227,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                     <td style="font-size:12px; color:var(--text-secondary); max-width:280px; word-break:break-word;">${boundAddress}</td>
                     <td style="text-align:center">${statusBadge}</td>
                     <td style="text-align:center">${usageCount}</td>
+                    <td style="text-align:center">${declineCount}</td>
                     <td style="text-align:center">${lastUsed}</td>
                     <td style="text-align:center">
                         <button class="btn-delete" onclick="deleteCardPoolItem(${card.id})" title="删除">
@@ -6216,11 +6241,11 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
 
         function getCardStatusBadge(card) {
             const status = (card.status || '').toLowerCase();
+            if (status === '订阅额度用尽') {
+                return '<span class="status-badge status-warning">额度用尽</span>';
+            }
             if (!card.is_active || card.is_active === 0 || status === '已报废') {
                 return '<span class="status-badge status-failed">已报废</span>';
-            }
-            if (status === '冷却中' || (card.cooldown_until && new Date(card.cooldown_until) > new Date())) {
-                return '<span class="status-badge status-warning">冷却中</span>';
             }
             return '<span class="status-badge status-success">正常</span>';
         }

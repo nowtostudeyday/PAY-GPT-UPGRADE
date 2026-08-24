@@ -95,6 +95,7 @@ async function executePaymentWithRetry(page, options) {
 
     const screenshots = [];
     const declinedLast4s = [];
+    const attemptedCardIds = new Set();
     let lastError = '';
     let lastCardLast4 = '';
     let billingHolderName = '';
@@ -113,7 +114,7 @@ async function executePaymentWithRetry(page, options) {
     progress(`开始支付（最多尝试 ${MAX_CARD_ATTEMPTS} 张卡）...`);
 
     for (let cardAttempt = 1; cardAttempt <= MAX_CARD_ATTEMPTS; cardAttempt += 1) {
-        const card = await store.reserveCard(ownerKey);
+        const card = await store.reserveCard(ownerKey, [...attemptedCardIds]);
         if (!card) {
             progress(cardAttempt === 1 ? '卡池无可用卡，终止支付' : `卡池已无更多可用卡（已拒 ${declinedLast4s.length} 张）`);
             if (cardAttempt === 1) {
@@ -142,6 +143,7 @@ async function executePaymentWithRetry(page, options) {
         };
         const cardLast4 = String(card.card_number || '').slice(-4);
         lastCardLast4 = cardLast4;
+        attemptedCardIds.add(card.id);
         progress(`已预留卡片 #${cardAttempt}: ...${cardLast4}`);
 
         let cardHandled = false;
@@ -172,7 +174,7 @@ async function executePaymentWithRetry(page, options) {
                 if (address.id) {
                     await markAddressBound(address.id, card.id);
                 }
-                await store.recordCardUsage(card.id);
+                const usageResult = await store.recordCardUsage(card.id);
                 await store.releaseCard(card.id);
                 cardHandled = true;
                 await store.createBillingRecord({
@@ -187,6 +189,9 @@ async function executePaymentWithRetry(page, options) {
                     status: 'success'
                 });
                 progress(`支付成功！卡片: ...${cardLast4}，姓名: ${holderName}，地址: ${address.line1}, ${address.city}`);
+                if (usageResult.exhausted) {
+                    progress(`卡 ...${cardLast4} 已达到订阅绑定上限，已标记为订阅额度用尽`);
+                }
                 if (paymentResult.screenshot) {
                     screenshots.push(paymentResult.screenshot);
                     progress(`SUCCESS_SCREENSHOT: ${paymentResult.screenshot}`);
@@ -215,9 +220,12 @@ async function executePaymentWithRetry(page, options) {
                     error_code: 'card_declined',
                     error_message: lastError
                 });
-                progress(`Stripe 拒绝支付，标记卡片已报废 (ID: ${card.id}, ...${cardLast4})`);
-                await store.markCardExhausted(card.id);
-                cardHandled = true;
+                const declineResult = await store.recordCardDecline(card.id);
+                progress(
+                    declineResult.exhausted
+                        ? `Stripe 拒绝支付，卡 ...${cardLast4} 已达到拒付上限并标记为已报废`
+                        : `Stripe 拒绝支付，卡 ...${cardLast4} 拒付计数 ${declineResult.declineCount}`
+                );
                 declinedLast4s.push(cardLast4);
 
                 if (cardAttempt < MAX_CARD_ATTEMPTS && paymentResult.canRetryCard !== false) {

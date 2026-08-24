@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS card_assets (
     card_cvc VARCHAR(16) NOT NULL DEFAULT '',
     card_holder VARCHAR(128) NOT NULL DEFAULT '' COMMENT '持卡人姓名',
     usage_count INT NOT NULL DEFAULT 0,
+    decline_count INT NOT NULL DEFAULT 0 COMMENT '明确拒付次数',
     sort_order INT NOT NULL DEFAULT 0,
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     status VARCHAR(32) NOT NULL DEFAULT '正常',

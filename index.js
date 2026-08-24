@@ -4,6 +4,7 @@ const { openApiCheckout } = require('./chatgpt');
 const store = require('./mysql-store');
 const { getRegionConfig, getRegionBrowserProfile } = require('./region-config');
 const { installChatGptSession, bootstrapChatGptSession } = require('./session-auth');
+const { cancelAutoRenew } = require('./subscription-check');
 const { connectTaskBrowser, applyCdpEnv, closeTaskBrowser } = require('./browser-runtime');
 const { preparePlaywrightProxy } = require('./playwright-proxy');
 const fs = require('fs');
@@ -588,6 +589,14 @@ async function run() {
         if (paymentResult.success) {
             paymentSucceeded = true;
             console.log(`    [+] 最终校验：支付成功! (stripe_card_payment)`);
+            const accessToken = String(loginInfo.session?.accessToken || CONFIG.chatgptToken).trim();
+            const cancellationEmail = loginInfo.email ? loginInfo.email : email;
+            const cancellationResult = await cancelAutoRenew(accessToken, { email: cancellationEmail });
+            if (cancellationResult.ok) {
+                console.log(`✅ [订阅] ${cancellationResult.data.message}`);
+            } else {
+                console.warn(`⚠️ [订阅] 支付成功，但取消自动续费失败: ${cancellationResult.error}`);
+            }
             console.log("PAYMENT_SUCCESS");
             for (const screenshotPath of paymentResult.screenshots || []) {
                 console.log(`SUCCESS_SCREENSHOT: ${screenshotPath}`);

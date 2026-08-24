@@ -264,83 +264,140 @@ async function injectChatGptCookies(context, cookieSpecs) {
     };
 }
 
+// 将不同格式的 Session Cookie 转为后续浏览器注入所需的统一对象数组。
 function collectCookieSpecs(sessionData, sessionJson) {
+    // 保存最终结果；每项至少包含 Cookie 名称和 Cookie 值。
     const specs = [];
+    // 保存“名称 + 值”的唯一标识，用于排除完全相同的 Cookie。
     const seen = new Set();
+    // 单独保存名称，用于判断某个关键 Cookie 是否已存在。
     const seenNames = new Set();
 
+    // 定义内部写入函数，统一完成清洗、去重和补充属性。
     const push = (name, value, extra = {}) => {
+        // 将名称转为字符串并去除首尾空格；空值会变成空字符串。
         const n = String(name || '').trim();
+        // 将值转为字符串并去除首尾空格；避免写入空 Cookie。
         const v = String(value || '').trim();
+        // Cookie 名称或值为空时，该 Cookie 无法使用，直接跳过。
         if (!n || !v) return;
+        // 使用空字符连接名称和值，生成不易冲突的去重键。
         const key = `${n}\0${v}`;
+        // 已经收集过相同名称和值时，避免重复注入浏览器。
         if (seen.has(key)) return;
+        // 记录本次 Cookie 的唯一键，供后续去重判断。
         seen.add(key);
+        // 记录 Cookie 名称，供后续关键 Cookie 是否存在的判断使用。
         seenNames.add(n);
+        // 将标准字段与额外属性合并后加入最终结果。
         specs.push({ name: n, value: v, ...extra });
     };
 
+    // 依次尝试原始 JSON 和已解析 Session 中的完整 cookies 数组。
     for (const source of [sessionJson?.cookies, sessionData?.cookies]) {
+        // 当前来源不是数组时无法遍历，跳到下一个来源。
         if (!Array.isArray(source)) continue;
+        // 逐项读取来源中的完整 Cookie 对象。
         for (const item of source) {
+            // 空值或非对象不是有效 Cookie 描述，直接跳过。
             if (!item || typeof item !== 'object') continue;
+            // 提取并清洗 Cookie 名称。
             const name = String(item.name || '').trim();
+            // 提取并清洗 Cookie 值。
             const value = String(item.value || '').trim();
+            // 名称或值缺失的 Cookie 无法注入，直接跳过。
             if (!name || !value) continue;
+            // 只接收 ChatGPT 域名的 Cookie，避免注入无关站点的数据。
             if (!isChatGptCookieDomain(item.domain)) continue;
+            // 保留完整 Cookie 属性，使浏览器按原有作用域和安全策略写入。
             push(name, value, {
+                // Cookie 生效的域名。
                 domain: item.domain,
+                // Cookie 生效的路径。
                 path: item.path,
+                // 是否仅允许 HTTPS 请求携带该 Cookie。
                 secure: item.secure,
+                // 是否禁止页面 JavaScript 直接读取该 Cookie。
                 httpOnly: item.httpOnly,
+                // 跨站请求时的携带策略。
                 sameSite: item.sameSite,
+                // 是否仅绑定当前主机而非所有子域名。
                 hostOnly: item.hostOnly
             });
         }
     }
 
-    for (const header of [sessionData?.cookieHeader, sessionData?.cookie_header, sessionJson?.cookieHeader, sessionJson?.cookie_header]) {
+    // 依次读取 camelCase 与 snake_case 形式的 Cookie 请求头。
+    for (const header of [
+        sessionData?.cookieHeader,
+        sessionData?.cookie_header,
+        sessionJson?.cookieHeader,
+        sessionJson?.cookie_header
+    ]) {
+        // 将“name=value; ...”请求头拆分为单个 Cookie 键值对。
         for (const pair of parseCookieHeader(header)) {
+            // 请求头不含域名等属性，只写入名称和值。
             push(pair.name, pair.value);
         }
     }
 
+    // 检查已收集的 Cookie 中是否已包含任意 session-token（包括分块名称）。
     const hasExportedSessionToken = [...seenNames].some((name) => isSessionTokenCookieName(name));
 
+    // 按优先级从环境变量和 Session 字段读取会话令牌。
     const sessionToken = String(
+        // 优先使用显式配置的完整 Session Cookie。
         process.env.CHATGPT_SESSION_COOKIE
+        // 兼容旧环境变量名称。
         || process.env.CHATGPT_SESSION_TOKEN
+        // 兼容 Session 中的 camelCase 字段。
         || sessionData?.sessionToken
+        // 兼容 Session 中的 snake_case 字段。
         || sessionData?.session_token
+        // 兼容直接以 Cookie 名为键保存的 Session 数据。
         || sessionData?.['__Secure-next-auth.session-token']
+        // 所有来源都不存在时转为空字符串，便于统一调用 trim。
         || ''
     ).trim();
 
+    // 只有拿到令牌且完整 Cookie 列表中尚未提供它时，才根据字段补齐。
     if (sessionToken && !hasExportedSessionToken) {
+        // 将可能超长的 NextAuth 会话令牌拆成浏览器可识别的分块 Cookie。
         const chunks = expandSessionTokenCookies(sessionToken);
+        // 多个分块意味着令牌长度超出单个 Cookie 的常见限制，记录诊断日志。
         if (chunks.length > 1) {
             console.log(`[Session] session-token 长度 ${sessionToken.length}，按 NextAuth 分 ${chunks.length} 块注入`);
         }
+        // 逐个添加拆分后的 session-token Cookie。
         for (const chunk of chunks) {
             push(chunk.name, chunk.value);
         }
     }
 
+    // 从 Session 的多种字段命名中读取 CSRF 令牌。
     const csrfToken = String(
+        // 优先使用 camelCase 字段。
         sessionData?.csrfToken
+        // 兼容 snake_case 字段。
         || sessionData?.csrf_token
+        // 兼容以实际 Cookie 名为键保存的字段。
         || sessionData?.['__Host-next-auth.csrf-token']
+        // 缺失时使用空字符串，避免 String(undefined) 变成字符串 "undefined"。
         || ''
     ).trim();
+    // CSRF 令牌存在且尚未由 cookies 或请求头提供时，补齐对应 Cookie。
     if (csrfToken && !seenNames.has('__Host-next-auth.csrf-token')) {
         push('__Host-next-auth.csrf-token', csrfToken);
     }
 
+    // 从 Session 的多种字段命名中读取 OpenAI 设备标识。
     const deviceId = String(sessionData?.deviceId || sessionData?.device_id || sessionData?.['oai-did'] || '').trim();
+    // 设备标识存在且尚未收集时，补齐 oai-did Cookie。
     if (deviceId && !seenNames.has('oai-did')) {
         push('oai-did', deviceId);
     }
 
+    // 返回已清洗、去重并补齐后的 Cookie 规格列表。
     return specs;
 }
 

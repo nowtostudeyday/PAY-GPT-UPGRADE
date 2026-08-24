@@ -22,6 +22,7 @@ const browserPool = require('./browser-pool');
 const { buildWorkerRuntimeEnv } = require('./browser-runtime');
 const { querySubscriptionBySession, validateSessionTokenForQuery, cancelAutoRenew, resumeAutoRenew } = require('./subscription-check');
 const gptApi = require('./gpt-api-client');
+const { isPaymentDeclined } = require('./payment-retry');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -2681,7 +2682,7 @@ app.get('/api/admin/cards', requireSecondaryAuth, async (req, res) => {
     try {
         await ensureStoreReady();
         const rows = await store.runQuery(
-            `SELECT id, card_number, card_expiry, card_cvc, card_holder,
+            `SELECT id, card_number, card_expiry, card_cvc, card_holder, decline_count,
                     payment_holder_name, payment_address_line1, payment_address_city,
                     payment_address_state, payment_address_postal, payment_address_id,
                     is_active, usage_count, last_used_at, status, cooldown_until
@@ -2703,6 +2704,7 @@ app.get('/api/admin/cards', requireSecondaryAuth, async (req, res) => {
             payment_address_id: row.payment_address_id || null,
             is_active: Number(row.is_active || 0),
             usage_count: Number(row.usage_count || 0),
+            decline_count: Number(row.decline_count || 0),
             last_used_at: row.last_used_at || null,
             status: row.status || '正常',
             cooldown_until: row.cooldown_until || null
@@ -3311,6 +3313,7 @@ async function runGptApiWorker({ task, token, session, cdk, planType }) {
         // 轮询状态
         let finalStatus = 'running';
         let finalMessage = '第三方代充进行中';
+        let cardDeclined = false;
         let lastRaw = submit.data;
         const maxPolls = Number(process.env.GPT_API_MAX_POLLS || 120);
         const pollIntervalMs = Number(process.env.GPT_API_POLL_INTERVAL_MS || 5000);
@@ -3339,6 +3342,7 @@ async function runGptApiWorker({ task, token, session, cdk, planType }) {
                 const businessResult = lastRaw && typeof lastRaw.result === 'object' ? lastRaw.result : {};
                 const succeeded = businessResult.ok === false ? false : isSuccessGptApiStatus(rawStatus);
                 const failureDetail = businessResult.error || lastRaw?.error || businessResult.status || rawStatus || 'unknown';
+                cardDeclined = !succeeded && isPaymentDeclined(String(failureDetail));
                 finalStatus = succeeded ? 'success' : 'failed';
                 finalMessage = succeeded ? '第三方代充开通成功' : `第三方代充失败: ${failureDetail}`;
                 await setProgress(
@@ -3368,10 +3372,23 @@ async function runGptApiWorker({ task, token, session, cdk, planType }) {
         if (finalStatus === 'success') {
             shouldRollbackCdk = false;
             await store.resetCdkFailure(cdk);
-            await store.recordCardUsage(reservedCard?.id);
+            const usageResult = await store.recordCardUsage(reservedCard?.id);
             await store.releaseCard(reservedCard?.id).catch(() => { });
+            if (usageResult.exhausted) {
+                logTask(jobKey, `卡 ...${String(reservedCard?.card_number || '').slice(-4)} 已达到订阅绑定上限，已标记为订阅额度用尽`);
+            }
             notifyTaskOutcome({ event: 'success', email: accountEmail, cdk, jobKey, message: finalMessage });
         } else {
+            if (cardDeclined) {
+                const declineResult = await store.recordCardDecline(reservedCard?.id);
+                logTask(
+                    jobKey,
+                    declineResult.exhausted
+                        ? `第三方代充明确拒付，卡 ...${String(reservedCard?.card_number || '').slice(-4)} 已达到拒付上限并标记为已报废`
+                        : `第三方代充明确拒付，卡 ...${String(reservedCard?.card_number || '').slice(-4)} 拒付计数 ${declineResult.declineCount}`,
+                    'warn'
+                );
+            }
             await store.releaseCard(reservedCard?.id).catch(() => { });
             notifyTaskOutcome({ event: 'failure', email: accountEmail, cdk, jobKey, message: finalMessage });
         }

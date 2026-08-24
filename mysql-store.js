@@ -194,6 +194,15 @@ async function initializeBaseData() {
             'hcaptcha_cdp_port', '9222'
         ]
     );
+    await runExecute(
+        `INSERT INTO app_config (config_key, config_value)
+         VALUES (?, ?), (?, ?)
+         ON DUPLICATE KEY UPDATE config_value = app_config.config_value`,
+        [
+            'card_max_subscription_count', '2',
+            'card_max_decline_count', '3'
+        ]
+    );
 }
 
 async function ensureAdminSecurityDefaults() {
@@ -353,6 +362,7 @@ async function ensureLegacyColumns() {
     await ensureColumn('card_assets', 'card_cvc', "VARCHAR(16) NOT NULL DEFAULT ''");
     await ensureColumn('card_assets', 'card_holder', "VARCHAR(128) NOT NULL DEFAULT ''");
     await ensureColumn('card_assets', 'usage_count', 'INT NOT NULL DEFAULT 0');
+    await ensureColumn('card_assets', 'decline_count', 'INT NOT NULL DEFAULT 0');
     await ensureColumn('card_assets', 'sort_order', 'INT NOT NULL DEFAULT 0');
     await ensureColumn('card_assets', 'is_active', 'TINYINT(1) NOT NULL DEFAULT 1');
     await ensureColumn('card_assets', 'status', "VARCHAR(32) NOT NULL DEFAULT '正常'");
@@ -820,12 +830,34 @@ async function getBillingOverviewStats() {
     }));
 }
 
+const CARD_POLICY_MIN = 1;
+const CARD_POLICY_MAX = 100;
+
+const normalizeCardPolicyValue = (value, label) => {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < CARD_POLICY_MIN || parsed > CARD_POLICY_MAX) {
+        throw new Error(`${label}必须是 ${CARD_POLICY_MIN}-${CARD_POLICY_MAX} 的整数`);
+    }
+    return parsed;
+};
+
+const getCardPolicy = async () => {
+    const [maxSubscriptionCount, maxDeclineCount] = await Promise.all([
+        getAppConfigValue('card_max_subscription_count'),
+        getAppConfigValue('card_max_decline_count')
+    ]);
+    return {
+        maxSubscriptionCount: normalizeCardPolicyValue(maxSubscriptionCount, '单卡最多绑定订阅数'),
+        maxDeclineCount: normalizeCardPolicyValue(maxDeclineCount, '单卡最多明确拒付次数')
+    };
+};
+
 async function getAdminData() {
     const [configRows, phoneRows, cardRows, logRows, statsRows, cdkStatsRows, billingOverviewRows] = await Promise.all([
         runQuery(
             `SELECT config_key, config_value
              FROM app_config
-             WHERE config_key IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             WHERE config_key IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 'proxy',
                 'max_concurrent_activations',
@@ -839,7 +871,9 @@ async function getAdminData() {
                 'email_source',
                 'inbox_api_base',
                 'inbox_email_domain',
-                'inbox_email_domains'
+                'inbox_email_domains',
+                'card_max_subscription_count',
+                'card_max_decline_count'
             ]
         ),
         runQuery(
@@ -848,7 +882,7 @@ async function getAdminData() {
              ORDER BY sort_order ASC, id ASC`
         ),
         runQuery(
-            `SELECT card_number, card_expiry, card_cvc, usage_count, is_active, status
+            `SELECT card_number, card_expiry, card_cvc, usage_count, decline_count, is_active, status
              FROM card_assets
              ORDER BY sort_order ASC, id ASC`
         ),
@@ -884,6 +918,14 @@ async function getAdminData() {
         config: {
             max_concurrent_activations: Math.max(1, Number(configMap.max_concurrent_activations || 1)),
             max_background_concurrent: Math.max(1, Number(configMap.max_background_concurrent || 1)),
+            card_max_subscription_count: normalizeCardPolicyValue(
+                configMap.card_max_subscription_count,
+                '单卡最多绑定订阅数'
+            ),
+            card_max_decline_count: normalizeCardPolicyValue(
+                configMap.card_max_decline_count,
+                '单卡最多明确拒付次数'
+            ),
             maintenance_mode: String(configMap.maintenance_mode || '0') === '1',
             maintenance_mode_drain: String(configMap.maintenance_mode_drain || '0') === '1',
             email_source: ['random', 'pool', 'inbox'].includes(String(configMap.email_source || ''))
@@ -910,6 +952,7 @@ async function getAdminData() {
                 expiry: row.card_expiry,
                 cvc: row.card_cvc,
                 usage_count: Number(row.usage_count || 0),
+                decline_count: Number(row.decline_count || 0),
                 is_active: Number(row.is_active || 0),
                 status: Number(row.is_active || 0) === 1
                     ? 'normal'
@@ -950,6 +993,21 @@ async function saveConfig(config = {}) {
             'max_background_concurrent',
             String(Math.max(1, Number(config.max_background_concurrent || 1)))
         ]);
+    }
+    let cardMaxSubscriptionCount = null;
+    if (hasOwn('card_max_subscription_count')) {
+        cardMaxSubscriptionCount = normalizeCardPolicyValue(
+            config.card_max_subscription_count,
+            '单卡最多绑定订阅数'
+        );
+        configEntries.push(['card_max_subscription_count', String(cardMaxSubscriptionCount)]);
+    }
+    if (hasOwn('card_max_decline_count')) {
+        const cardMaxDeclineCount = normalizeCardPolicyValue(
+            config.card_max_decline_count,
+            '单卡最多明确拒付次数'
+        );
+        configEntries.push(['card_max_decline_count', String(cardMaxDeclineCount)]);
     }
     if (hasOwn('maintenance_mode')) {
         configEntries.push(['maintenance_mode', config.maintenance_mode ? '1' : '0']);
@@ -1028,6 +1086,10 @@ async function saveConfig(config = {}) {
                 params,
                 { connection }
             );
+        }
+
+        if (cardMaxSubscriptionCount !== null) {
+            await reconcileCardSubscriptionLimit(cardMaxSubscriptionCount, connection);
         }
 
         if (phonePool !== null) {
@@ -2961,39 +3023,41 @@ async function getClaimedProductDownloadInfo(cdk) {
 
 // ─── Card Pool Enhanced Methods ────────────────────────────────────────────────
 
-/**
- * 从卡池中分配一张可用卡并加锁。
- * 选卡策略：is_active=1, in_use=0, status='正常', 冷却已过期或无冷却 →
- *           按 usage_count ASC, last_used_at ASC（NULL 排最前）选取。
- * 使用 FOR UPDATE SKIP LOCKED 避免并发冲突。
- * @param {string} ownerKey - 锁持有者标识（通常为 jobKey）
- * @returns {object|null} 卡片信息 { id, card_number, card_expiry, card_cvc, card_holder, usage_count } 或 null（无可用卡）
- */
 async function hasAvailableCard() {
+    const policy = await getCardPolicy();
     const rows = await runQuery(
         `SELECT id
          FROM card_assets
          WHERE is_active = 1
            AND in_use = 0
            AND status = '正常'
-           AND (cooldown_until IS NULL OR cooldown_until < NOW())
-         LIMIT 1`
+           AND usage_count < ?
+         LIMIT 1`,
+        [policy.maxSubscriptionCount]
     );
     return rows.length > 0;
 }
 
-async function reserveCard(ownerKey) {
+async function reserveCard(ownerKey, excludedCardIds) {
+    const policy = await getCardPolicy();
+    const excludedIds = Array.isArray(excludedCardIds)
+        ? [...new Set(excludedCardIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))]
+        : [];
+    const excludedClause = excludedIds.length
+        ? ` AND id NOT IN (${excludedIds.map(() => '?').join(', ')})`
+        : '';
     return withTransaction(async (connection) => {
         const [rows] = await connection.query(
-            `SELECT id, card_number, card_expiry, card_cvc, card_holder, usage_count
+            `SELECT id, card_number, card_expiry, card_cvc, card_holder, usage_count, decline_count
              FROM card_assets
              WHERE is_active = 1
                AND in_use = 0
                AND status = '正常'
-               AND (cooldown_until IS NULL OR cooldown_until < NOW())
+               AND usage_count < ?${excludedClause}
              ORDER BY usage_count ASC, COALESCE(last_used_at, '1970-01-01') ASC, id ASC
              LIMIT 1
-             FOR UPDATE SKIP LOCKED`
+             FOR UPDATE SKIP LOCKED`,
+            [policy.maxSubscriptionCount, ...excludedIds]
         );
 
         if (!rows.length) {
@@ -3016,7 +3080,8 @@ async function reserveCard(ownerKey) {
             card_expiry: row.card_expiry,
             card_cvc: row.card_cvc,
             card_holder: row.card_holder,
-            usage_count: Number(row.usage_count || 0)
+            usage_count: Number(row.usage_count || 0),
+            decline_count: Number(row.decline_count || 0)
         };
     });
 }
@@ -3039,44 +3104,15 @@ async function releaseCard(cardId) {
     );
 }
 
-/**
- * 将卡片标记为已报废（Stripe 明确拒绝）。
- * @param {number} cardId - 卡片 ID
- */
-async function markCardExhausted(cardId) {
-    if (!cardId) {
-        return;
-    }
-    await runExecute(
-        `UPDATE card_assets
-         SET is_active = 0,
-             status = '已报废',
-             in_use = 0,
-             locked_at = NULL,
-             locked_by = NULL
-         WHERE id = ?`,
-        [Number(cardId)]
-    );
-}
-
-/**
- * 记录卡片使用，管理 24h 内使用计数和冷却机制。
- * - 如果 daily_usage_reset_at 为 NULL 或早于 24h 前，重置计数为 1 并设 reset_at = NOW()
- * - 否则递增 daily_usage_count
- * - 如果递增后 daily_usage_count >= 3，设置 cooldown_until = NOW() + 24h
- * 同时更新 usage_count（总使用次数）和 last_used_at。
- * @param {number} cardId - 卡片 ID
- * @returns {{ dailyUsageCount: number, cooledDown: boolean }} 更新后的日使用次数及是否触发冷却
- */
 async function recordCardUsage(cardId) {
     if (!cardId) {
-        return { dailyUsageCount: 0, cooledDown: false };
+        return { usageCount: 0, exhausted: false };
     }
 
+    const policy = await getCardPolicy();
     return withTransaction(async (connection) => {
-        // 获取当前卡片状态
         const [rows] = await connection.query(
-            `SELECT daily_usage_count, daily_usage_reset_at
+            `SELECT usage_count
              FROM card_assets
              WHERE id = ?
              FOR UPDATE`,
@@ -3084,56 +3120,92 @@ async function recordCardUsage(cardId) {
         );
 
         if (!rows.length) {
-            return { dailyUsageCount: 0, cooledDown: false };
+            return { usageCount: 0, exhausted: false };
         }
 
         const row = rows[0];
-        const now = new Date();
-        const resetAt = row.daily_usage_reset_at ? new Date(row.daily_usage_reset_at) : null;
-        const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-        let newDailyCount;
-
-        if (!resetAt || resetAt < twentyFourHoursAgo) {
-            // 24h 窗口过期或未设置，重置计数
-            newDailyCount = 1;
-            await connection.query(
-                `UPDATE card_assets
-                 SET daily_usage_count = 1,
-                     daily_usage_reset_at = NOW(),
-                     usage_count = usage_count + 1,
-                     last_used_at = NOW()
-                 WHERE id = ?`,
-                [Number(cardId)]
-            );
-        } else {
-            // 在 24h 窗口内，递增
-            newDailyCount = Number(row.daily_usage_count || 0) + 1;
-            await connection.query(
-                `UPDATE card_assets
-                 SET daily_usage_count = daily_usage_count + 1,
-                     usage_count = usage_count + 1,
-                     last_used_at = NOW()
-                 WHERE id = ?`,
-                [Number(cardId)]
-            );
-        }
-
-        // 检查是否需要冷却
-        let cooledDown = false;
-        if (newDailyCount >= 3) {
-            await connection.query(
-                `UPDATE card_assets
-                 SET cooldown_until = DATE_ADD(NOW(), INTERVAL 24 HOUR)
-                 WHERE id = ?`,
-                [Number(cardId)]
-            );
-            cooledDown = true;
-        }
-
-        return { dailyUsageCount: newDailyCount, cooledDown };
+        const usageCount = Number(row.usage_count || 0) + 1;
+        const exhausted = usageCount >= policy.maxSubscriptionCount;
+        await connection.query(
+            `UPDATE card_assets
+             SET usage_count = ?,
+                 decline_count = 0,
+                 last_used_at = NOW(),
+                 is_active = ?,
+                 status = ?
+             WHERE id = ?`,
+            [
+                usageCount,
+                exhausted ? 0 : 1,
+                exhausted ? '订阅额度用尽' : '正常',
+                Number(cardId)
+            ]
+        );
+        return { usageCount, exhausted };
     });
 }
+
+async function recordCardDecline(cardId) {
+    if (!cardId) {
+        return { declineCount: 0, exhausted: false };
+    }
+
+    const policy = await getCardPolicy();
+    return withTransaction(async (connection) => {
+        const [rows] = await connection.query(
+            `SELECT decline_count
+             FROM card_assets
+             WHERE id = ?
+             FOR UPDATE`,
+            [Number(cardId)]
+        );
+        if (!rows.length) {
+            return { declineCount: 0, exhausted: false };
+        }
+
+        const declineCount = Number(rows[0].decline_count || 0) + 1;
+        const exhausted = declineCount >= policy.maxDeclineCount;
+        await connection.query(
+            `UPDATE card_assets
+             SET decline_count = ?,
+                 is_active = ?,
+                 status = ?
+             WHERE id = ?`,
+            [
+                declineCount,
+                exhausted ? 0 : 1,
+                exhausted ? '已报废' : '正常',
+                Number(cardId)
+            ]
+        );
+        return { declineCount, exhausted };
+    });
+}
+
+const reconcileCardSubscriptionLimit = async (maxSubscriptionCount, connection) => {
+    await runExecute(
+        `UPDATE card_assets
+         SET is_active = 0,
+             status = '订阅额度用尽',
+             in_use = 0,
+             locked_at = NULL,
+             locked_by = NULL
+         WHERE usage_count >= ?
+           AND status = '正常'`,
+        [maxSubscriptionCount],
+        { connection }
+    );
+    await runExecute(
+        `UPDATE card_assets
+         SET is_active = 1,
+             status = '正常'
+         WHERE usage_count < ?
+           AND status = '订阅额度用尽'
+           AND in_use = 0`,
+        [maxSubscriptionCount],
+        { connection }
+    );
+};
 
 /**
  * 支付成功后，将持卡人姓名与免税地址绑定到卡片记录
@@ -3614,8 +3686,8 @@ module.exports = {
     reserveCard,
     hasAvailableCard,
     releaseCard,
-    markCardExhausted,
     recordCardUsage,
+    recordCardDecline,
     bindCardPaymentProfile,
     importCards,
     getPaymentRegion,
