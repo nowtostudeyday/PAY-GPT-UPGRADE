@@ -2544,16 +2544,24 @@ async function saveAdminPaths({ loginPath, panelPath }) {
 
 async function updateAdminEmail(email) {
     const normalized = String(email || '').trim().toLowerCase();
-    if (!normalized || !normalized.includes('@')) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) || normalized.length > 254) {
         throw new Error('管理员邮箱格式无效');
     }
-    await runExecute(
-        `INSERT INTO app_config (config_key, config_value)
-         VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-        ['admin_email', normalized]
-    );
-    return normalized;
+    const authConfig = await getAdminAuthConfig();
+    const nextVersion = Math.max(1, Number(authConfig.passwordVersion || 1)) + 1;
+    await withTransaction(async (connection) => {
+        await runExecute(
+            `INSERT INTO app_config (config_key, config_value)
+             VALUES (?, ?), (?, ?)
+             ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
+            [
+                'admin_email', normalized,
+                'admin_password_version', String(nextVersion)
+            ],
+            { connection }
+        );
+    });
+    return { email: normalized, passwordVersion: nextVersion };
 }
 
 async function updateAdminSecondaryPassword(password) {

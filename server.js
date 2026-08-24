@@ -2943,6 +2943,43 @@ app.post('/api/admin/change-password', async (req, res) => {
     }
 });
 
+app.post('/api/admin/change-email', async (req, res) => {
+    const email = adminAuth.normalizeEmail(req.body?.email);
+    const currentPassword = String(req.body?.currentPassword || '');
+
+    if (!email) {
+        return res.status(400).json({ success: false, message: '请输入新的管理员邮箱' });
+    }
+    if (!currentPassword) {
+        return res.status(400).json({ success: false, message: '请输入当前登录密码' });
+    }
+
+    try {
+        await ensureStoreReady();
+        const authConfig = await store.getAdminAuthConfig();
+        if (!verifyPassword(currentPassword, authConfig.passwordHash)) {
+            return res.status(400).json({ success: false, message: '当前登录密码错误' });
+        }
+        if (email === authConfig.email) {
+            return res.status(400).json({ success: false, message: '新邮箱不能与当前邮箱相同' });
+        }
+
+        const updated = await store.updateAdminEmail(email);
+        await logAdminSecurityEvent('admin_email_changed', {
+            ...adminAuth.getClientMeta(req),
+            email: updated.email,
+            detail: `管理员登录邮箱已由 ${authConfig.email} 修改为 ${updated.email}`
+        });
+        return res.json({
+            success: true,
+            email: updated.email,
+            message: '管理员登录邮箱已修改，请使用新邮箱重新登录'
+        });
+    } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+    }
+});
+
 app.get('/api/admin/cdks', requireSecondaryAuth, async (req, res) => {
     try {
         await ensureStoreReady();

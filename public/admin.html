@@ -2276,6 +2276,21 @@
                 </p>
                 <div style="margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 10px;">
                     <div class="form-group" style="margin-bottom: 12px;">
+                        <label>管理员登录邮箱</label>
+                        <input type="email" id="admin_login_email" class="asset-input" placeholder="admin@example.com" autocomplete="email">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 12px;">
+                        <label>当前登录密码</label>
+                        <input type="password" id="admin_email_current_password" class="asset-input" placeholder="用于确认修改操作" autocomplete="current-password">
+                    </div>
+                    <p style="font-size:14px; color:var(--text-dim); margin-bottom:12px;">保存后所有后台登录会话将失效，请使用新邮箱和当前密码重新登录。</p>
+                    <button class="btn btn-secondary" onclick="saveAdminEmail(this)">
+                        <i data-lucide="mail-check"></i>
+                        保存登录邮箱
+                    </button>
+                </div>
+                <div style="margin-top: 20px; padding: 14px; border: 1px solid var(--border); border-radius: 10px;">
+                    <div class="form-group" style="margin-bottom: 12px;">
                         <label>登录入口路径</label>
                         <input type="text" id="admin_login_path" class="asset-input" placeholder="例如 secure-login" autocomplete="off" spellcheck="false">
                         <div id="admin_login_path_url" style="font-size: 12px; color: var(--text-dim); margin-top: 6px;"></div>
@@ -3240,6 +3255,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
             login_failed: '登录失败',
             '2fa_failed': '二次验证失败',
             password_changed: '修改密码',
+            admin_email_changed: '修改登录邮箱',
             logout: '退出登录'
         };
         const statusMap = {
@@ -3657,6 +3673,10 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 const modeEl = document.getElementById('admin_2fa_login_mode');
                 if (modeEl && data.login2faMode) {
                     modeEl.value = data.login2faMode;
+                }
+                const adminEmailEl = document.getElementById('admin_login_email');
+                if (adminEmailEl && data.email) {
+                    adminEmailEl.value = data.email;
                 }
                 if (data.loginUrl) {
                     adminLoginPath = data.loginUrl;
@@ -7021,6 +7041,45 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 showMessage(error.message || '修改失败', 'error');
             } finally {
                 btn.innerHTML = originalContent;
+                lucide.createIcons();
+            }
+        }
+
+        async function saveAdminEmail(button) {
+            const email = document.getElementById('admin_login_email').value.trim();
+            const currentPassword = document.getElementById('admin_email_current_password').value;
+            if (!email) {
+                showMessage('请输入新的管理员邮箱', 'warning');
+                return;
+            }
+            if (!currentPassword) {
+                showMessage('请输入当前登录密码', 'warning');
+                return;
+            }
+
+            const originalContent = button.innerHTML;
+            button.disabled = true;
+            button.innerHTML = '<i data-lucide="loader" class="animate-spin"></i> 保存中...';
+            lucide.createIcons();
+
+            try {
+                const res = await authFetch('/api/admin/change-email', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, currentPassword })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || '修改失败');
+                }
+                document.getElementById('admin_email_current_password').value = '';
+                showMessage(data.message, 'success');
+                setTimeout(redirectToLogin, 900);
+            } catch (error) {
+                showMessage(error.message || '修改失败', 'error');
+            } finally {
+                button.disabled = false;
+                button.innerHTML = originalContent;
                 lucide.createIcons();
             }
         }
