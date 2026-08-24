@@ -6836,16 +6836,37 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
         };
 
         const copyCardSupplierWebhookEndpoint = async () => {
-            const endpoint = document.getElementById('card_supplier_webhook_endpoint')?.value;
-            if (!endpoint) {
+            const endpointInput = document.getElementById('card_supplier_webhook_endpoint');
+            const endpoint = endpointInput?.value;
+            if (!endpoint || !endpointInput) {
                 showMessage('Webhook 地址尚未生成', 'warning');
                 return;
             }
+            const copyWithSelection = () => {
+                if (typeof document.execCommand !== 'function') {
+                    return false;
+                }
+                endpointInput.focus();
+                endpointInput.select();
+                endpointInput.setSelectionRange(0, endpoint.length);
+                const copied = document.execCommand('copy');
+                endpointInput.setSelectionRange(0, 0);
+                endpointInput.blur();
+                return copied;
+            };
             try {
-                await navigator.clipboard.writeText(endpoint);
+                if (window.isSecureContext && navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(endpoint);
+                } else if (!copyWithSelection()) {
+                    throw new Error('浏览器不支持自动复制');
+                }
                 showMessage('Webhook 地址已复制', 'success');
             } catch (error) {
-                showMessage(`复制失败，请手动复制地址：${error.message}`, 'error');
+                if (copyWithSelection()) {
+                    showMessage('Webhook 地址已复制', 'success');
+                    return;
+                }
+                showMessage('复制失败，请手动选择并复制地址', 'error');
             }
         };
 
