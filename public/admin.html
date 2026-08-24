@@ -2152,6 +2152,36 @@
             </div>
 
             <div class="panel" style="margin-top: 24px;">
+                <h2 class="panel-title">卡片供应商开卡 Webhook</h2>
+                <p style="font-size: 13px; color: var(--text-dim); margin-top: 8px;">
+                    接收 <code>CARD_ISSUE.SUCCESS</code> 开卡事件后，系统会验签、解密并自动导入卡池。保存后立即生效，无需重启服务。
+                </p>
+                <div class="form-group" style="margin-top: 20px;">
+                    <label>Webhook 地址</label>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <input type="text" id="card_supplier_webhook_endpoint" class="asset-input" readonly>
+                        <button type="button" class="btn btn-secondary" onclick="copyCardSupplierWebhookEndpoint()">
+                            <i data-lucide="copy"></i>
+                            复制地址
+                        </button>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 16px;">
+                    <label>Webhook Secret</label>
+                    <input type="password" id="card_supplier_webhook_secret" class="asset-input" placeholder="whsec_..." autocomplete="new-password">
+                    <p id="card_supplier_webhook_hint" style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">
+                        仅用于验证供应商推送签名与解密卡片敏感字段。输入框不会回显已保存的 Secret。
+                    </p>
+                </div>
+                <div style="margin-top: 24px; display: flex; justify-content: flex-end;">
+                    <button type="button" class="btn btn-primary" onclick="saveCardSupplierWebhookConfig()">
+                        <i data-lucide="save"></i>
+                        保存供应商配置
+                    </button>
+                </div>
+            </div>
+
+            <div class="panel" style="margin-top: 24px;">
                 <h2 class="panel-title">hCaptcha 自动求解</h2>
                 <p style="font-size: 13px; color: var(--text-dim); margin-top: 8px;">
                     支付时遇到 Stripe「One more step」人机验证：优先使用打码平台（createTask/getTaskResult）兜底 passive checkbox；
@@ -5144,6 +5174,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 cardMaxDeclineEl.value = cfg.card_max_decline_count;
             }
             loadTelegramConfig(data.telegram || {});
+            loadCardSupplierWebhookConfig(data.card_supplier || {});
             loadHcaptchaConfig(data.hcaptcha || {});
             lastMaintenanceModeValue = Boolean(cfg.maintenance_mode);
             updateMaintenanceModeUI(cfg, window.__adminRuntime || { active_activation_jobs: 0 });
@@ -6782,6 +6813,67 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 showMessage(error.message || 'Telegram 测试失败', 'error');
             }
         }
+
+        const loadCardSupplierWebhookConfig = (cardSupplier) => {
+            const cfg = cardSupplier || {};
+            const endpoint = document.getElementById('card_supplier_webhook_endpoint');
+            const secret = document.getElementById('card_supplier_webhook_secret');
+            const hint = document.getElementById('card_supplier_webhook_hint');
+            if (endpoint) {
+                endpoint.value = `${window.location.origin}/api/webhooks/card-issue`;
+            }
+            if (secret) {
+                secret.value = '';
+                secret.placeholder = cfg.webhook_secret_saved
+                    ? `已保存（${cfg.webhook_secret_preview}）留空不修改`
+                    : 'whsec_...';
+            }
+            if (hint) {
+                hint.textContent = cfg.webhook_secret_saved
+                    ? 'Webhook Secret 已保存。输入新值并保存即可轮换，旧值将立即失效。'
+                    : '尚未配置 Webhook Secret。请在供应商后台订阅 CARD_ISSUE 后填入对应 Secret。';
+            }
+        };
+
+        const copyCardSupplierWebhookEndpoint = async () => {
+            const endpoint = document.getElementById('card_supplier_webhook_endpoint')?.value;
+            if (!endpoint) {
+                showMessage('Webhook 地址尚未生成', 'warning');
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(endpoint);
+                showMessage('Webhook 地址已复制', 'success');
+            } catch (error) {
+                showMessage(`复制失败，请手动复制地址：${error.message}`, 'error');
+            }
+        };
+
+        const saveCardSupplierWebhookConfig = async () => {
+            const secret = document.getElementById('card_supplier_webhook_secret')?.value.trim();
+            if (!secret) {
+                showMessage('请输入 Webhook Secret 后再保存', 'warning');
+                return;
+            }
+            try {
+                const res = await authFetch('/api/admin/card-supplier', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ webhook_secret: secret })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || '保存失败');
+                }
+                showMessage(data.message, 'success');
+                await reloadSystemConfigFromServer();
+            } catch (error) {
+                showMessage(error.message || '供应商配置保存失败', 'error');
+            }
+        };
+
+        window.copyCardSupplierWebhookEndpoint = copyCardSupplierWebhookEndpoint;
+        window.saveCardSupplierWebhookConfig = saveCardSupplierWebhookConfig;
 
         function loadHcaptchaConfig(hcaptcha) {
             const cfg = hcaptcha || {};

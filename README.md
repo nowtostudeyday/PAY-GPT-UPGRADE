@@ -27,7 +27,9 @@
 | 第三方代充流程 | 保持终态失败行为 | 第三方返回明确拒付时，系统只记录拒付计数和卡片状态，任务仍按原有逻辑直接失败，不自动创建新的代充订单或重试扣款。 |
 | 管理后台 | 卡池配置和状态可视化 | “系统配置 → 并发与维护”新增两个阈值配置；卡池列表新增“成功订阅”“拒付”列，并展示“额度用尽”“已报废”等状态。 |
 | 管理后台安全 | 修改管理员登录邮箱 | “安全设置”支持修改管理员登录邮箱。保存时必须验证当前登录密码，操作会写入安全审计日志并使所有现有后台登录会话失效；之后须使用新邮箱和原密码重新登录。 |
-| 数据库兼容 | 启动时自动迁移 | 新数据库在建表时包含 `card_assets.decline_count`；已有数据库在应用启动时自动补齐该字段及两项默认配置。数据库账户需要具备 `ALTER TABLE` 权限。 |
+| 卡片供应商卡池补货 | 开卡事件自动入池 | 接收供应商 `CARD_ISSUE.SUCCESS` Webhook，完成 HMAC 验签与 AES-256-GCM 三要素解密后自动导入卡池；按事件 ID 幂等，重复投递不会重复入卡。 |
+| 卡片供应商后台配置 | 页面管理 Webhook Secret | “系统配置”新增供应商配置区，可复制接收地址并保存/轮换 Webhook Secret。管理接口仅返回掩码状态，保存后新 Secret 立即用于验签和解密，无需重启服务。 |
+| 数据库兼容 | 启动时自动迁移 | 新数据库包含 `card_assets.decline_count` 与 `webhook_event_receipts`；已有数据库启动时自动补齐卡片字段、创建 Webhook 幂等记录表，并初始化相关配置。数据库账户需要具备 `ALTER TABLE` 和建表权限。 |
 | 会话认证代码 | Cookie 收集逻辑注释 | 为 Session Cookie 的清洗、去重、分块注入和 CSRF/设备 Cookie 补齐逻辑补充中文注释，便于排查会话注入问题。 |
 
 ### 升级与回滚边界
@@ -35,6 +37,7 @@
 - 升级到本版本后，重启应用会自动执行上述数据库兼容迁移；不会删除已有卡片或历史账单。
 - 下调“单卡最多绑定订阅数”并保存配置时，已达到新上限的卡片会立即停止选用；上调上限时，未被其他原因禁用的“订阅额度用尽”卡可恢复选用。
 - “已报废”表示达到明确拒付阈值，不会因上调订阅上限自动恢复；如需重新启用，应在确认卡片状态后由管理员人工处理。
+- 供应商 Webhook Secret 保存在 MySQL 的应用配置中，后台不提供明文读取或清空操作；需要轮换时直接填写新值并保存。旧版 `.env` 中已有的 `CARD_SUPPLIER_WEBHOOK_SECRET` 只会在首次升级启动时迁入数据库，不会覆盖后台保存的新值。
 - Docker 部署更新源码后，应重新构建应用镜像：`docker compose up -d --build app`。仅执行 `docker compose restart app` 不会更新未挂载到容器的前端静态文件。
 
 > ## 加入 Telegram 社群
@@ -159,6 +162,28 @@ https://kc.vpss.eu.cc/
 API Key 至少需要 `plans:read`、`balance:read`、`pay:write` Scope；如需使用任務查詢，另需 `tasks:read`。完整供應商協議見 [對接 API 文件](对接api.md)。
 
 > 瀏覽器池預設關閉（`BROWSER_POOL=0`）。第三方代充模式不使用本地瀏覽器開通流程。
+
+---
+
+## 卡片供应商开卡 Webhook
+
+系统提供独立的开卡接收端点，不与通用外部卡池 Webhook 共用：
+
+```text
+POST https://你的域名/api/webhooks/card-issue
+```
+
+配置步骤：
+
+1. 登录后台，在「系统配置 → 卡片供应商开卡 Webhook」填写并保存 Webhook Secret。页面只显示掩码状态，保存后立即生效；不要将供应商 API Key 或 API Secret 写入本项目。
+2. 在供应商后台配置页面显示的 HTTPS 地址，并订阅 `CARD_ISSUE` 事件。
+3. 收到 `CARD_ISSUE.SUCCESS` 后，系统验证 `X-VCC-WEBHOOK-*` 签名头，使用原始请求体计算签名，并解密卡号、有效期和 CVV 后导入卡池。
+
+已在 `.env` 配置 `CARD_SUPPLIER_WEBHOOK_SECRET` 的旧部署，会在升级后的首次启动时自动迁入 MySQL；数据库已有值时，`.env` 不会覆盖后台保存的新值。
+
+供应商采用至少一次投递。系统使用 `eventId` 去重：同一事件重试时会直接返回纯文本 `ok`，不会重复导入卡片。签名、解密或卡片格式校验失败时返回非 `2xx`，由供应商按其重试策略再次投递。
+
+> Webhook Secret、完整卡号和 CVV 都不会写入应用日志或 Webhook 事件记录。请仅通过 HTTPS 对外暴露此端点，并在供应商凭据泄露后立即轮换。
 
 ---
 
@@ -421,7 +446,9 @@ sudo certbot --nginx -d your-domain.com
 | 查询 CDK 状态 | `GET /api/cdk/query?cdk=...` | 无 |
 | 后台登录 | `POST /api/admin/login` | 密码 |
 | 卡池批量导入 | `POST /api/admin/cards/import` | Bearer |
+| 卡片供应商 Webhook 配置 | `POST /api/admin/card-supplier` | Bearer |
 | 外部卡池推送 | `POST /api/external/cards/push` | X-API-Key |
+| 卡片供应商开卡推送 | `POST /api/webhooks/card-issue` | 供应商 HMAC 签名 |
 | 账单 CSV 导出 | `GET /api/admin/billing/export` | Bearer |
 | 实时运行日志 | `GET /api/admin/runtime-logs` | Bearer |
 

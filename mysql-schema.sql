@@ -47,6 +47,22 @@ CREATE TABLE IF NOT EXISTS card_assets (
     KEY idx_card_assets_pick (is_active, in_use, locked_at, usage_count)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS webhook_event_receipts (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    provider VARCHAR(32) NOT NULL,
+    event_id VARCHAR(128) NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    payload_hash CHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    imported_count INT NOT NULL DEFAULT 0,
+    skipped_count INT NOT NULL DEFAULT 0,
+    error_message VARCHAR(255) NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_webhook_event_receipts_provider_event (provider, event_id),
+    KEY idx_webhook_event_receipts_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS cdk_codes (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     cdk_code VARCHAR(32) NOT NULL,

@@ -912,8 +912,11 @@ async function getAdminData() {
     const billingOverview = Array.isArray(billingOverviewRows) ? billingOverviewRows : [];
     const primaryBilling = billingOverview[0] || { currency: 'USD', revenue: 0, paid_count: 0 };
     const configMap = Object.fromEntries(configRows.map((row) => [row.config_key, row.config_value]));
-    const telegram = await getTelegramConfig();
-    const hcaptcha = await getHcaptchaConfig();
+    const [telegram, hcaptcha, cardSupplier] = await Promise.all([
+        getTelegramConfig(),
+        getHcaptchaConfig(),
+        getCardSupplierWebhookConfig()
+    ]);
     return {
         config: {
             max_concurrent_activations: Math.max(1, Number(configMap.max_concurrent_activations || 1)),
@@ -974,6 +977,7 @@ async function getAdminData() {
         },
         telegram,
         hcaptcha: publicHcaptchaConfig(hcaptcha),
+        card_supplier: publicCardSupplierWebhookConfig(cardSupplier),
         logs: logRows
     };
 }
@@ -2063,6 +2067,45 @@ async function setAppConfigValue(configKey, configValue) {
         [String(configKey), String(configValue ?? '')]
     );
 }
+
+const CARD_SUPPLIER_WEBHOOK_SECRET_CONFIG_KEY = 'card_supplier_webhook_secret';
+
+const getCardSupplierWebhookConfig = async () => {
+    const storedSecret = await getAppConfigValue(CARD_SUPPLIER_WEBHOOK_SECRET_CONFIG_KEY);
+    const webhookSecret = typeof storedSecret === 'string' ? storedSecret.trim() : '';
+    return {
+        webhook_secret: webhookSecret,
+        webhook_secret_saved: Boolean(webhookSecret),
+        webhook_secret_preview: webhookSecret ? `${webhookSecret.slice(0, 10)}…${webhookSecret.slice(-4)}` : ''
+    };
+};
+
+const publicCardSupplierWebhookConfig = (config) => ({
+    webhook_secret: '',
+    webhook_secret_saved: config.webhook_secret_saved,
+    webhook_secret_preview: config.webhook_secret_preview
+});
+
+const saveCardSupplierWebhookConfig = async (config = {}) => {
+    const webhookSecret = typeof config.webhook_secret === 'string' ? config.webhook_secret.trim() : '';
+    if (!webhookSecret) {
+        return getCardSupplierWebhookConfig();
+    }
+    await setAppConfigValue(CARD_SUPPLIER_WEBHOOK_SECRET_CONFIG_KEY, webhookSecret);
+    return getCardSupplierWebhookConfig();
+};
+
+const initializeCardSupplierWebhookConfig = async (webhookSecret) => {
+    if (typeof webhookSecret !== 'string') {
+        return;
+    }
+    const existing = await getCardSupplierWebhookConfig();
+    const envSecret = webhookSecret.trim();
+    if (!existing.webhook_secret_saved && envSecret) {
+        await setAppConfigValue(CARD_SUPPLIER_WEBHOOK_SECRET_CONFIG_KEY, envSecret);
+        console.log('[卡片供应商] 已将 .env 中的 Webhook Secret 初始化到数据库');
+    }
+};
 
 const BROWSER_POOL_CONFIG_KEY = 'browser_pool_enabled';
 
@@ -3355,6 +3398,152 @@ async function importCards(cards) {
     };
 }
 
+const validateCardSupplierWebhookEvent = ({ eventId, eventType, payloadHash }) => {
+    const normalizedEventId = String(eventId || '').trim();
+    const normalizedEventType = String(eventType || '').trim();
+    const normalizedPayloadHash = String(payloadHash || '').trim().toLowerCase();
+    if (!normalizedEventId || normalizedEventId.length > 128) {
+        throw new Error('卡片供应商事件 ID 无效');
+    }
+    if (!normalizedEventType || normalizedEventType.length > 64) {
+        throw new Error('卡片供应商事件类型无效');
+    }
+    if (!/^[a-f0-9]{64}$/.test(normalizedPayloadHash)) {
+        throw new Error('卡片供应商事件哈希无效');
+    }
+    return {
+        eventId: normalizedEventId,
+        eventType: normalizedEventType,
+        payloadHash: normalizedPayloadHash
+    };
+};
+
+async function acknowledgeCardSupplierWebhookEvent(event) {
+    const normalized = validateCardSupplierWebhookEvent(event);
+    return withTransaction(async (connection) => {
+        const [existingRows] = await connection.query(
+            `SELECT status, payload_hash
+             FROM webhook_event_receipts
+             WHERE provider = 'card_supplier'
+               AND event_id = ?
+             FOR UPDATE`,
+            [normalized.eventId]
+        );
+        if (existingRows.length > 0) {
+            if (existingRows[0].payload_hash !== normalized.payloadHash) {
+                throw new Error('卡片供应商重复事件正文不一致');
+            }
+            return { duplicate: true, status: existingRows[0].status };
+        }
+
+        await connection.query(
+            `INSERT INTO webhook_event_receipts
+                (provider, event_id, event_type, payload_hash, status)
+             VALUES ('card_supplier', ?, ?, ?, 'ignored')`,
+            [normalized.eventId, normalized.eventType, normalized.payloadHash]
+        );
+        return { duplicate: false, status: 'ignored' };
+    });
+}
+
+async function importCardSupplierCardIssueEvent(event) {
+    const normalized = validateCardSupplierWebhookEvent(event);
+    const cards = Array.isArray(event.cards) ? event.cards : [];
+    if (cards.length === 0) {
+        throw new Error('卡片供应商开卡事件缺少卡片数据');
+    }
+
+    return withTransaction(async (connection) => {
+        const [receiptRows] = await connection.query(
+            `SELECT status, payload_hash, imported_count, skipped_count
+             FROM webhook_event_receipts
+             WHERE provider = 'card_supplier'
+               AND event_id = ?
+             FOR UPDATE`,
+            [normalized.eventId]
+        );
+        if (receiptRows.length > 0 && receiptRows[0].payload_hash !== normalized.payloadHash) {
+            throw new Error('卡片供应商重复事件正文不一致');
+        }
+        if (receiptRows.length > 0 && receiptRows[0].status === 'success') {
+            return {
+                duplicate: true,
+                imported: Number(receiptRows[0].imported_count),
+                skipped: Number(receiptRows[0].skipped_count)
+            };
+        }
+
+        if (receiptRows.length > 0) {
+            await connection.query(
+                `UPDATE webhook_event_receipts
+                 SET event_type = ?,
+                     payload_hash = ?,
+                     status = 'processing',
+                     imported_count = 0,
+                     skipped_count = 0,
+                     error_message = ''
+                 WHERE provider = 'card_supplier'
+                   AND event_id = ?`,
+                [normalized.eventType, normalized.payloadHash, normalized.eventId]
+            );
+        } else {
+            await connection.query(
+                `INSERT INTO webhook_event_receipts
+                    (provider, event_id, event_type, payload_hash, status)
+                 VALUES ('card_supplier', ?, ?, ?, 'processing')`,
+                [normalized.eventId, normalized.eventType, normalized.payloadHash]
+            );
+        }
+
+        let imported = 0;
+        let skipped = 0;
+        for (const card of cards) {
+            const validation = validateCard(card);
+            if (!validation.valid) {
+                throw new Error(`卡片供应商卡片数据无效: ${validation.errors.join('；')}`);
+            }
+
+            const cardNumber = String(card.card_number).trim();
+            const [existingRows] = await connection.query(
+                `SELECT id
+                 FROM card_assets
+                 WHERE card_number = ?
+                 LIMIT 1
+                 FOR UPDATE`,
+                [cardNumber]
+            );
+            if (existingRows.length > 0) {
+                skipped += 1;
+                continue;
+            }
+
+            await connection.query(
+                `INSERT INTO card_assets
+                    (card_number, card_expiry, card_cvc, card_holder, sort_order, is_active, status)
+                 VALUES (?, ?, ?, ?, 0, 1, '正常')`,
+                [
+                    cardNumber,
+                    String(card.card_expiry).trim(),
+                    String(card.card_cvc).trim(),
+                    String(card.card_holder || '').trim()
+                ]
+            );
+            imported += 1;
+        }
+
+        await connection.query(
+            `UPDATE webhook_event_receipts
+             SET status = 'success',
+                 imported_count = ?,
+                 skipped_count = ?
+             WHERE provider = 'card_supplier'
+               AND event_id = ?`,
+            [imported, skipped, normalized.eventId]
+        );
+        return { duplicate: false, imported, skipped };
+    });
+}
+
 // ─── Region Selector ────────────────────────────────────────────────────────
 
 const { SUPPORTED_REGIONS, DEFAULT_REGION } = require('./region-config');
@@ -3659,6 +3848,9 @@ module.exports = {
     setBrowserPoolEnabled,
     getTelegramConfig,
     saveTelegramConfig,
+    getCardSupplierWebhookConfig,
+    saveCardSupplierWebhookConfig,
+    initializeCardSupplierWebhookConfig,
     getGptApiConfig,
     saveGptApiConfig,
     getHcaptchaConfig,
@@ -3698,6 +3890,8 @@ module.exports = {
     recordCardDecline,
     bindCardPaymentProfile,
     importCards,
+    acknowledgeCardSupplierWebhookEvent,
+    importCardSupplierCardIssueEvent,
     getPaymentRegion,
     setPaymentRegion,
     createBillingRecord,

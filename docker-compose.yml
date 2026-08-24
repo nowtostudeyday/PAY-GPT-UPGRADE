@@ -63,6 +63,7 @@ services:
       BROWSER_POOL_SIZE: ${BROWSER_POOL_SIZE:-2}
       BROWSER_POOL_MAX_SIZE: ${BROWSER_POOL_MAX_SIZE:-24}
       BROWSER_POOL_BASE_PORT: ${BROWSER_POOL_BASE_PORT:-19222}
+      CARD_SUPPLIER_WEBHOOK_SECRET: ${CARD_SUPPLIER_WEBHOOK_SECRET}
     volumes:
       - ./debug_screenshots:/app/debug_screenshots
       - ./data:/app/data
@@ -93,6 +94,7 @@ services:
       - ./admin-auth.js:/app/admin-auth.js
       - ./admin-paths.js:/app/admin-paths.js
       - ./gpt-api-client.js:/app/gpt-api-client.js
+      - ./card-supplier-webhook.js:/app/card-supplier-webhook.js
       - ./hcaptcha/solver.py:/app/hcaptcha/solver.py
     # 浏览器自动化 + hCaptcha ML 推理需要较大共享内存
     shm_size: '2gb'

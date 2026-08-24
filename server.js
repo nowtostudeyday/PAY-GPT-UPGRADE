@@ -23,6 +23,11 @@ const { buildWorkerRuntimeEnv } = require('./browser-runtime');
 const { querySubscriptionBySession, validateSessionTokenForQuery, cancelAutoRenew, resumeAutoRenew } = require('./subscription-check');
 const gptApi = require('./gpt-api-client');
 const { isPaymentDeclined } = require('./payment-retry');
+const {
+    CARD_SUPPLIER_CARD_ISSUE_SUCCESS_EVENT,
+    verifyCardSupplierWebhook,
+    decryptCardSupplierIssuedCards
+} = require('./card-supplier-webhook');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -307,6 +312,47 @@ process.on('exit', () => cleanupProcesses());
 let storeReadyPromise = null;
 
 const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || '15mb';
+const sendCardSupplierWebhookOk = (res) => res.status(200).type('text/plain').send('ok');
+
+app.post('/api/webhooks/card-issue', express.raw({ type: 'application/json', limit: JSON_BODY_LIMIT }), async (req, res) => {
+    const rawBody = req.body;
+    let payload;
+    try {
+        payload = JSON.parse(rawBody.toString('utf8'));
+    } catch (_) {
+        return res.status(400).type('text/plain').send('Webhook JSON 格式无效');
+    }
+
+    try {
+        await ensureStoreReady();
+        const cardSupplierConfig = await store.getCardSupplierWebhookConfig();
+        const webhookSecret = cardSupplierConfig.webhook_secret;
+        if (!webhookSecret) {
+            return res.status(503).type('text/plain').send('卡片供应商 Webhook 未配置');
+        }
+        const verification = verifyCardSupplierWebhook({
+            headers: req.headers,
+            payload,
+            rawBody,
+            webhookSecret
+        });
+        if (!verification.valid) {
+            return res.status(401).type('text/plain').send('Webhook 签名校验失败');
+        }
+        if (verification.eventType !== CARD_SUPPLIER_CARD_ISSUE_SUCCESS_EVENT) {
+            await store.acknowledgeCardSupplierWebhookEvent(verification);
+            return sendCardSupplierWebhookOk(res);
+        }
+
+        const cards = decryptCardSupplierIssuedCards(payload, webhookSecret);
+        await store.importCardSupplierCardIssueEvent({ ...verification, cards });
+        return sendCardSupplierWebhookOk(res);
+    } catch (error) {
+        console.warn(`[卡片供应商 Webhook] 处理失败: ${error.message}`);
+        return res.status(500).type('text/plain').send('Webhook 处理失败');
+    }
+});
+
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
 let cachedAdminPaths = null;
@@ -369,7 +415,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 function ensureStoreReady() {
     if (!storeReadyPromise) {
-        storeReadyPromise = store.ensureReady().catch((error) => {
+        storeReadyPromise = store.ensureReady().then(async () => {
+            await store.initializeCardSupplierWebhookConfig(process.env.CARD_SUPPLIER_WEBHOOK_SECRET);
+        }).catch((error) => {
             storeReadyPromise = null;
             throw error;
         });
@@ -2238,6 +2286,17 @@ app.post('/api/admin/telegram', async (req, res) => {
             on_card_pool_empty: Boolean(body.on_card_pool_empty)
         });
         res.json({ success: true, message: 'Telegram 通知配置已保存' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.post('/api/admin/card-supplier', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        const body = req.body ?? {};
+        await store.saveCardSupplierWebhookConfig({ webhook_secret: body.webhook_secret });
+        res.json({ success: true, message: '卡片供应商 Webhook Secret 已保存并立即生效' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
