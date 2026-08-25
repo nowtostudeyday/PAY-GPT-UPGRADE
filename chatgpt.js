@@ -5,6 +5,45 @@ const store = require('./mysql-store');
 const { getRegionConfig } = require('./region-config');
 const { executePaymentWithRetry } = require('./payment-retry');
 
+const CHECKOUT_PLAN_RULES = Object.freeze({
+    plus: {
+        label: 'ChatGPT Plus',
+        expectedPatterns: [/chatgpt\s+plus\b/i, /\bplus\s+plan\b/i],
+        forbiddenPatterns: [/chatgpt\s+go\b/i, /\bgo\s+plan\b/i, /chatgpt\s+pro\b/i, /\bpro\s+plan\b/i]
+    },
+    pro_5x: {
+        label: 'ChatGPT Pro 5x',
+        expectedPatterns: [/\bpro\s*5\s*x\b/i, /\bpro\s*\(\s*5\s*x\s*\)/i],
+        forbiddenPatterns: [/chatgpt\s+go\b/i, /\bgo\s+plan\b/i, /chatgpt\s+plus\b/i, /\bplus\s+plan\b/i, /\bpro\s*20\s*x\b/i]
+    },
+    pro_20x: {
+        label: 'ChatGPT Pro 20x',
+        expectedPatterns: [/\bpro\s*20\s*x\b/i, /\bpro\s*\(\s*20\s*x\s*\)/i],
+        forbiddenPatterns: [/chatgpt\s+go\b/i, /\bgo\s+plan\b/i, /chatgpt\s+plus\b/i, /\bplus\s+plan\b/i, /\bpro\s*5\s*x\b/i]
+    }
+});
+
+async function assertCheckoutPlanMatchesExpected(page, planType) {
+    const rule = CHECKOUT_PLAN_RULES[planType];
+    if (!rule) {
+        throw new Error(`不支持的目标套餐类型: ${planType}`);
+    }
+
+    const pageText = String(await page.textContent('body', { timeout: 10000 }).catch(() => '') || '');
+    const normalizedText = pageText.replace(/\s+/g, ' ').trim();
+    const forbidden = rule.forbiddenPatterns.find((pattern) => pattern.test(normalizedText));
+    if (forbidden) {
+        throw new Error(`Checkout 套餐不匹配：期望 ${rule.label}，页面检测到非目标套餐 (${forbidden.source})`);
+    }
+
+    const matched = rule.expectedPatterns.some((pattern) => pattern.test(normalizedText));
+    if (!matched) {
+        throw new Error(`无法确认 Checkout 套餐为 ${rule.label}，为防止错充已停止付款`);
+    }
+
+    console.log(`✅ [套餐校验] 付款前已确认 Checkout 套餐: ${rule.label}`);
+}
+
 function buildCheckoutPayload(planName, country, currency) {
     const uiMode = String(process.env.CHECKOUT_UI_MODE || 'custom').trim() || 'custom';
     return {
@@ -447,3 +486,4 @@ module.exports.openApiCheckout = openApiCheckout;
 module.exports.createHostedCheckoutLink = createHostedCheckoutLink;
 module.exports.buildCheckoutPayload = buildCheckoutPayload;
 module.exports.formatApiErrorDetail = formatApiErrorDetail;
+module.exports.assertCheckoutPlanMatchesExpected = assertCheckoutPlanMatchesExpected;

@@ -768,6 +768,18 @@ function analyzeProcessOutput(output, timedOut) {
         || normalized.includes('#pricing');
     const success = normalized.includes('PAYMENT_SUCCESS') || normalized.includes('最终校验：支付成功') || normalized.includes('支付成功');
 
+    if (normalized.includes('PAID_PLAN_MISMATCH')) {
+        return {
+            status: 'manual',
+            message: '已扣款，但实际订阅套餐与请求套餐不一致；CDK 已保留，请人工核验后处理',
+            reachedPayment: true,
+            shouldRetry: false,
+            deletePhone: false,
+            deleteCard: false,
+            retainCdk: true
+        };
+    }
+
     if (success) {
         return {
             status: 'success',
@@ -2061,7 +2073,8 @@ app.post('/api/admin/subscription/cancel-auto-renew', async (req, res) => {
         });
 
         if (!result.ok) {
-            return res.status(result.statusCode || 502).json({
+            const responseStatusCode = result.statusCode === 401 ? 422 : (result.statusCode || 502);
+            return res.status(responseStatusCode).json({
                 success: false,
                 message: result.error || '取消自动续费失败'
             });
@@ -2095,7 +2108,8 @@ app.post('/api/admin/subscription/enable-auto-renew', async (req, res) => {
         });
 
         if (!result.ok) {
-            return res.status(result.statusCode || 502).json({
+            const responseStatusCode = result.statusCode === 401 ? 422 : (result.statusCode || 502);
+            return res.status(responseStatusCode).json({
                 success: false,
                 message: result.error || '开启自动续费失败'
             });
@@ -3724,9 +3738,11 @@ function spawnActivationWorker({ task, token, sessionRaw, cdk, cdkDetails, clien
                 });
             }
 
-            if (finalStatus !== 'success') {
+            if (finalStatus !== 'success' && !normalizedAnalysis?.retainCdk) {
                 await store.markCdkUnused(cdk);
                 logTask(task.jobKey, `CDK ${cdk} 已回滚为未使用`);
+            } else if (normalizedAnalysis?.retainCdk) {
+                logTask(task.jobKey, `CDK ${cdk} 已保留，避免已扣款任务被重复发起`);
             }
 
             if (isNoActivationEligibilityMessage(normalizedAnalysis?.message)) {

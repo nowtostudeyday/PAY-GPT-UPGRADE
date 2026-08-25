@@ -30,6 +30,21 @@ const ORIGIN_LABELS = {
     google_play: 'Google Play'
 };
 
+const EXPECTED_SUBSCRIPTION_PLAN_KEYS = Object.freeze({
+    plus: [/plus/i],
+    pro_5x: [/pro[_\s-]*lite/i, /pro[_\s-]*5x/i],
+    pro_20x: [/^chatgptpro$/i, /pro[_\s-]*20x/i]
+});
+
+function matchesExpectedSubscriptionPlan(subscription, expectedPlanType) {
+    const expectedPlanSignatures = EXPECTED_SUBSCRIPTION_PLAN_KEYS[expectedPlanType];
+    if (!expectedPlanSignatures || !subscription?.hasActiveSubscription) {
+        return false;
+    }
+    const actualPlan = String(subscription.rawPlan || subscription.planKey || '').trim();
+    return expectedPlanSignatures.some((pattern) => pattern.test(actualPlan));
+}
+
 function normalizeSubscriptionPlan(subPlan, hasActive) {
     const raw = String(subPlan || '').trim().toLowerCase();
     if (!raw) {
@@ -679,10 +694,12 @@ async function querySubscriptionBySession(accessToken, options = {}) {
 
 module.exports = {
     BILLING_PAGE_URL,
+    EXPECTED_SUBSCRIPTION_PLAN_KEYS,
     normalizeSubscriptionPlan,
     formatPurchaseOrigin,
     computeRemainingDays,
     parseAccountCheckResponse,
+    matchesExpectedSubscriptionPlan,
     validateSessionTokenForQuery,
     querySubscriptionBySession,
     cancelAutoRenew,
