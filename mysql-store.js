@@ -3605,6 +3605,26 @@ async function createBillingRecord(data) {
     return result.insertId;
 }
 
+async function updateBillingRecordOutcome(id, data) {
+    const recordId = Number(id);
+    if (!recordId) {
+        return false;
+    }
+    const result = await runExecute(
+        `UPDATE billing_records
+         SET plan_type = ?, status = ?, error_code = ?, error_message = ?
+         WHERE id = ?`,
+        [
+            String(data.plan_type),
+            String(data.status),
+            data.error_code ? String(data.error_code) : null,
+            data.error_message ? String(data.error_message).slice(0, 512) : null,
+            recordId
+        ]
+    );
+    return result.affectedRows > 0;
+}
+
 /**
  * 查询账单列表（分页 + 筛选）
  * @param {object} filters - { startDate, endDate, cardLast4, planType, status }
@@ -3895,6 +3915,7 @@ module.exports = {
     getPaymentRegion,
     setPaymentRegion,
     createBillingRecord,
+    updateBillingRecordOutcome,
     listBillingRecords,
     exportBillingRecordsCSV,
     getCardBillingSummary,
