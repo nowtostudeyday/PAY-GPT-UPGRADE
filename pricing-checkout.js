@@ -43,10 +43,130 @@ const REGION_CURRENT_COUNTRY_HINTS = {
 
 const SKIP_REGION_BUTTON_TEXT = /^(Upgrade|Personal|Business|Free|Plus|Pro|Subscribe|Close|Your current plan|升级|订阅|关闭)$/i;
 
-const PLAN_UPGRADE_PATTERNS = {
-    plus: [/升级至\s*Plus/i, /Upgrade to Plus/i, /Get Plus/i, /Subscribe to Plus/i, /重新加入\s*Plus/i],
-    pro_5x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
-    pro_20x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i]
+const PLAN_UPGRADE_TEST_IDS = Object.freeze({
+    plus: 'select-plan-button-plus-upgrade',
+    pro_5x: 'select-plan-button-pro-upgrade',
+    pro_20x: 'select-plan-button-pro-upgrade'
+});
+
+const PRICING_PAGE_INITIAL_WAIT_MS = 5000;
+const PRICING_PAGE_READY_TIMEOUT_MS = 10000;
+
+const PRO_VARIANTS = Object.freeze({
+    pro_5x: { checkoutValue: 'chatgptprolite', pricingRadioLabel: '5x' },
+    pro_20x: { checkoutValue: 'chatgptpro', pricingRadioLabel: '20x' }
+});
+
+const resolvePlanUpgradeTestId = (planType) => {
+    const plan = String(planType).trim().toLowerCase();
+    const testId = PLAN_UPGRADE_TEST_IDS[plan];
+    if (!testId) {
+        throw new Error(`不支持 UI 定价页套餐: ${plan}`);
+    }
+    return testId;
+};
+
+const getUniqueVisiblePlanButton = async (page, planType) => {
+    const plan = String(planType).trim().toLowerCase();
+    const testId = resolvePlanUpgradeTestId(plan);
+    const button = page.getByTestId(testId);
+    const count = await button.count();
+    if (count !== 1) {
+        throw new Error(`定价页套餐按钮数量异常: ${plan} / ${testId} / ${count}`);
+    }
+    if (!(await button.isVisible({ timeout: 4000 }))) {
+        throw new Error(`定价页套餐按钮不可见: ${plan} / ${testId}`);
+    }
+    return { plan, testId, button };
+};
+
+const isPricingPlanSelectorVisible = async (page, planType) => {
+    const testIds = typeof planType === 'string'
+        ? [resolvePlanUpgradeTestId(planType)]
+        : [...new Set(Object.values(PLAN_UPGRADE_TEST_IDS))];
+    for (const testId of testIds) {
+        const button = page.getByTestId(testId);
+        if ((await button.count()) !== 1) {
+            continue;
+        }
+        if (await button.isVisible({ timeout: 500 }).catch(() => false)) {
+            return true;
+        }
+    }
+    return false;
+};
+
+const waitForPricingPlanSelector = async (page, planType) => {
+    const deadline = Date.now() + PRICING_PAGE_READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        if (await isPricingPlanSelectorVisible(page, planType)) {
+            return;
+        }
+        await page.waitForTimeout(500);
+    }
+    const planDescription = typeof planType === 'string' ? ` (${planType})` : '';
+    throw new Error(`定价页未展示套餐选择按钮${planDescription}，当前 URL: ${page.url()}`);
+};
+
+const getProVariant = (planType) => PRO_VARIANTS[String(planType).trim().toLowerCase()];
+
+const selectProVariantOnPricingPage = async (page, planType) => {
+    const plan = String(planType).trim().toLowerCase();
+    const variant = getProVariant(plan);
+    if (!variant) {
+        return false;
+    }
+
+    const radio = page.getByRole('radio', { name: variant.pricingRadioLabel, exact: true });
+    const count = await radio.count();
+    if (count === 0) {
+        return false;
+    }
+    if (count !== 1) {
+        throw new Error(`定价页 Pro 档位按钮数量异常: ${plan} / ${variant.pricingRadioLabel} / ${count}`);
+    }
+    if (!(await radio.isVisible({ timeout: 4000 }))) {
+        throw new Error(`定价页 Pro 档位按钮不可见: ${plan} / ${variant.pricingRadioLabel}`);
+    }
+
+    await radio.click({ timeout: 10000 });
+    await page.waitForTimeout(300);
+    if (await radio.getAttribute('aria-checked') !== 'true') {
+        throw new Error(`定价页 Pro 档位未选中: ${plan} / ${variant.pricingRadioLabel}`);
+    }
+    console.log(`✅ [步骤] 定价页已选择 Pro 档位: ${plan} (${variant.pricingRadioLabel})`);
+    return true;
+};
+
+const selectProVariantOnCheckoutPage = async (page, planType) => {
+    const plan = String(planType).trim().toLowerCase();
+    const variant = getProVariant(plan);
+    if (!variant) {
+        return;
+    }
+
+    const option = page.locator(`#${variant.checkoutValue}`);
+    const count = await option.count();
+    if (count !== 1) {
+        throw new Error(`Checkout Pro 档位按钮数量异常: ${plan} / ${variant.checkoutValue} / ${count}`);
+    }
+    if (!(await option.isVisible({ timeout: 4000 }))) {
+        throw new Error(`Checkout Pro 档位按钮不可见: ${plan} / ${variant.checkoutValue}`);
+    }
+    const role = await option.getAttribute('role');
+    const value = await option.getAttribute('value');
+    if (role !== 'radio' || value !== variant.checkoutValue) {
+        throw new Error(`Checkout Pro 档位标识不匹配: ${plan} / ${variant.checkoutValue}`);
+    }
+
+    await option.click({ timeout: 10000 });
+    await page.waitForTimeout(300);
+    const ariaChecked = await option.getAttribute('aria-checked');
+    const dataState = await option.getAttribute('data-state');
+    if (ariaChecked !== 'true' || dataState !== 'checked') {
+        throw new Error(`Checkout Pro 档位未确认选中: ${plan} / ${variant.checkoutValue}`);
+    }
+    console.log(`✅ [步骤] Checkout 已确认 Pro 档位: ${plan} (${variant.checkoutValue})`);
 };
 
 function normalizeOptionText(text) {
@@ -557,7 +677,7 @@ async function pageShowsCurrency(page, regionCode) {
 async function waitForPricingPage(page, timeout = 60000) {
     await page.goto(PRICING_URL, { waitUntil: 'domcontentloaded', timeout });
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(PRICING_PAGE_INITIAL_WAIT_MS);
 
     await clearHumanVerification(page, { phase: 'pricing-page', maxWaitMs: 120000 });
 
@@ -567,6 +687,7 @@ async function waitForPricingPage(page, timeout = 60000) {
     if (!url.includes('chatgpt.com')) {
         throw new Error(`定价页打开失败，当前 URL: ${url}`);
     }
+    await waitForPricingPlanSelector(page);
     console.log('✅ [步骤] 已打开 ChatGPT 定价页 (#pricing)');
 }
 
@@ -633,88 +754,18 @@ async function selectPricingRegion(page, regionCode) {
  * 点击对应套餐的升级按钮
  */
 async function clickPlanUpgrade(page, planType) {
-    const plan = String(planType || 'plus').toLowerCase();
-    const patterns = PLAN_UPGRADE_PATTERNS[plan] || PLAN_UPGRADE_PATTERNS.plus;
+    const plan = String(planType).trim().toLowerCase();
     console.log(`📦 [步骤] 正在点击升级按钮 (套餐: ${plan})...`);
 
     await assertChatGptLoggedIn(page, '升级前');
     await switchToPersonalPlans(page);
     await page.waitForTimeout(1000);
 
-    for (const pattern of patterns) {
-        try {
-            const btn = page.getByRole('button', { name: pattern }).first();
-            if (await btn.isVisible({ timeout: 4000 })) {
-                await btn.scrollIntoViewIfNeeded().catch(() => {});
-                await btn.click({ timeout: 10000 });
-                console.log(`✅ [步骤] 已点击升级按钮: ${pattern}`);
-                return;
-            }
-        } catch (_) { /* try next */ }
-    }
-
-    const cardTitle = plan === 'plus' ? /ChatGPT Plus/i : /ChatGPT Pro/i;
-    try {
-        const card = page.locator('div').filter({ hasText: cardTitle }).filter({ has: page.getByRole('button') }).first();
-        const btn = card.getByRole('button').filter({ hasText: /升级|Upgrade|Subscribe|Get/i }).first();
-        if (await btn.isVisible({ timeout: 3000 })) {
-            await btn.scrollIntoViewIfNeeded().catch(() => {});
-            await btn.click({ timeout: 10000 });
-            console.log('✅ [步骤] 已点击套餐卡片内的升级按钮');
-            return;
-        }
-    } catch (_) { /* fall through */ }
-
-    if (plan === 'plus') {
-        try {
-            const plusCard = page.locator('div').filter({ has: page.getByText(/ChatGPT Plus|^Plus$/i) }).filter({
-                has: page.getByRole('button', { name: /^Upgrade$|^升级$/i })
-            }).first();
-            const upgradeBtn = plusCard.getByRole('button', { name: /^Upgrade$|^升级$/i }).first();
-            if (await upgradeBtn.isVisible({ timeout: 3000 })) {
-                await upgradeBtn.scrollIntoViewIfNeeded().catch(() => {});
-                await upgradeBtn.click({ timeout: 10000 });
-                console.log('✅ [步骤] 已点击 Plus 卡片 Upgrade 按钮');
-                return;
-            }
-        } catch (_) { /* fall through */ }
-    }
-
-    const fallbackSelectors = plan === 'plus'
-        ? [
-            'button:has-text("升级至 Plus")',
-            'button:has-text("Upgrade to Plus")',
-            '[role="dialog"] >> text=ChatGPT Plus >> .. >> .. >> button:has-text("Upgrade")',
-            'text=ChatGPT Plus >> xpath=ancestor::div[.//button[contains(., "Upgrade") or contains(., "升级")]][1] >> button'
-        ]
-        : [
-            'button:has-text("升级至 Pro")',
-            'button:has-text("Upgrade to Pro")',
-            'text=ChatGPT Pro >> xpath=ancestor::div[.//button[contains(., "Upgrade") or contains(., "升级")]][1] >> button'
-        ];
-
-    for (const sel of fallbackSelectors) {
-        try {
-            const btn = page.locator(sel).first();
-            if (await btn.isVisible({ timeout: 3000 })) {
-                await btn.scrollIntoViewIfNeeded().catch(() => {});
-                await btn.click({ timeout: 10000 });
-                console.log(`✅ [步骤] 已点击升级按钮 (${sel})`);
-                return;
-            }
-        } catch (_) { /* try next */ }
-    }
-
-    const onLogin = await page.locator('text=Sign in with Google').isVisible({ timeout: 1000 }).catch(() => false);
-    if (onLogin) {
-        throw new Error('Session 未生效：定价页显示 Google 登录，无法点击升级按钮');
-    }
-
-    if (await isBusinessPlanView(page)) {
-        throw new Error(`定价页仍在 Business 视图，未找到 ${plan} 套餐；请确认账号可升级 Plus/Pro`);
-    }
-
-    throw new Error(`未找到 ${plan} 套餐的升级按钮，请确认账号可升级且 Session 已登录`);
+    const target = await getUniqueVisiblePlanButton(page, plan);
+    const button = target.button;
+    await button.scrollIntoViewIfNeeded().catch(() => {});
+    await button.click({ timeout: 10000 });
+    console.log(`✅ [步骤] 已点击套餐按钮: ${target.testId}`);
 }
 
 async function waitForCheckoutPage(page, timeout = 90000) {
@@ -741,15 +792,26 @@ async function waitForCheckoutPage(page, timeout = 90000) {
 
 async function openPricingCheckout(page, { region, planType }) {
     await waitForPricingPage(page);
+    await waitForPricingPlanSelector(page, planType);
     await switchToPersonalPlans(page);
     await selectPricingRegion(page, region);
+    await selectProVariantOnPricingPage(page, planType);
     await clickPlanUpgrade(page, planType);
     const checkoutUrl = await waitForCheckoutPage(page);
+    await selectProVariantOnCheckoutPage(page, planType);
     return checkoutUrl;
 }
 
 module.exports = {
     PRICING_URL,
+    PLAN_UPGRADE_TEST_IDS,
+    PRO_VARIANTS,
+    resolvePlanUpgradeTestId,
+    getUniqueVisiblePlanButton,
+    isPricingPlanSelectorVisible,
+    waitForPricingPlanSelector,
+    selectProVariantOnPricingPage,
+    selectProVariantOnCheckoutPage,
     openPricingCheckout,
     waitForPricingPage,
     selectPricingRegion,

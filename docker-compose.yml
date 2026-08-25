@@ -39,6 +39,7 @@ services:
         condition: service_healthy
     ports:
       - "${PORT:-3100}:3000"
+      - "127.0.0.1:${NOVNC_PORT:-6080}:6080"
     environment:
       PORT: 3000
       DB_HOST: mysql
@@ -47,7 +48,9 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-your_mysql_password}
       DB_NAME: ${DB_NAME:-plus_papay}
       DB_POOL_LIMIT: 60
-      HEADFUL: 0
+      HEADFUL: ${HEADFUL:-0}
+      VNC_PASSWORD: ${VNC_PASSWORD:-}
+      NOVNC_PORT: ${NOVNC_PORT:-6080}
       PROXY: ${PROXY:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       HCAPTCHA_CONFIG_FILE: /app/data/hcaptcha-config.json

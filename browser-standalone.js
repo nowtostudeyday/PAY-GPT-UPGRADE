@@ -39,7 +39,7 @@ async function connectStandaloneBrowser(options = {}) {
         '--disable-blink-features=AutomationControlled',
         `--remote-debugging-port=${cdpPort}`
     ];
-    if (!headful) {
+    if (!headful || process.env.RUNNING_IN_DOCKER === '1') {
         launchArgs.push('--no-sandbox', '--disable-setuid-sandbox');
     }
 

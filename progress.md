@@ -1,5 +1,48 @@
 
 
+## 2026-08-25 - Task: 支持 Docker 有头浏览器调试
+### What was done
+- Compose 的 `HEADFUL` 改为读取 `.env`，不再固定为 `0`。
+- `HEADFUL=1` 时，容器启动 Xvfb、x11vnc 和 noVNC；通过本机 noVNC 查看容器内 Chromium。
+- Docker 浏览器启动统一添加 sandbox 兼容参数，支持 root 容器中的有头 Chromium。
+### Testing
+- 待 Docker daemon 启动后执行 `docker compose up -d --build app` 验证。
+### Notes
+- 有头调试必须设置 `VNC_PASSWORD`，noVNC 只绑定本机 `127.0.0.1`。
+- 远程服务器请使用 SSH 隧道访问 noVNC，禁止直接暴露端口。
+
+
+## 2026-08-25 - Task: 支付链接调试支持 API 回退 UI
+### What was done
+- 支付链接调试 worker 使用与正式充值相同的 `CHECKOUT_MODE=api`：优先尝试内部 Checkout API，失败后回退定价页套餐选择流程。
+- API 成功时，调试任务同样打开 Checkout 页面，确认最终付款按钮出现后才停止。
+- 调试流程确认最终订阅/支付按钮已可见后输出链接并返回，不会调用填卡、订阅或扣款逻辑。
+- API 模式即使处于调试状态，创建失败时也允许回退 UI，避免调试路径被提前中断。
+### Testing
+- `node --check index.js`、`node --check server.js` 通过。
+### Notes
+- 调试页提示已同步为 API 优先、失败回退 UI 的流程。
+- 正式充值流程保持既有行为；`CHECKOUT_DEBUG_ONLY=1` 仅在最终付款前停止。
+
+
+## 2026-08-25 - Task: 收紧 UI 定价页套餐按钮定位
+### What was done
+- 在菲律宾定价页核验 Plus 和 Pro 按钮的稳定 `data-testid`：`select-plan-button-plus-upgrade`、`select-plan-button-pro-upgrade`。
+- UI 升级流程改为仅按套餐 `data-testid` 精确定位；移除按钮文案、class、XPath 和全页 `Upgrade` 兜底。
+- 按钮缺失、不可见或匹配数量不为 1 时直接失败，避免误点其他套餐。
+- Pro 先在定价页选择 5x/20x 并校验，再在 Checkout 使用 `#chatgptprolite` / `#chatgptpro` 精确选择并确认最终档位。
+### Testing
+- 浏览器只读核验：菲律宾定价页的 Plus、Pro `data-testid` 均唯一且可见。
+
+## 2026-08-25 - Task: 等待定价页套餐卡片后再切换地区
+
+- 定价页导航完成后固定等待 5 秒，再处理人机验证与登录态。
+- 仅在 Plus 或 Pro 的稳定 `data-testid` 唯一且可见时，才视为已进入定价页；并在地区切换前再次确认本次请求套餐的按钮已就绪；否则最多额外等待 10 秒后明确失败。
+- 新增 `test/pricing-checkout.test.js` 覆盖套餐 test id 映射与未知套餐失败。
+### Notes
+- `pro_5x` 与 `pro_20x` 共用外层 ChatGPT Pro 按钮，再通过两阶段档位选择完成 UI 区分；Checkout 未出现唯一对应选项时会失败，不会继续支付。
+
+
 ## 2026-08-25 - Task: 修復 UI 定價頁 Plus 誤選套餐
 ### What was done
 - 移除 Plus 流程的全頁通用 `Upgrade` 按鈕匹配，避免在定價頁新增 Go 等套餐後誤點第一個升級按鈕。

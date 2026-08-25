@@ -17,6 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl ca-certificates fonts-liberation fonts-noto-cjk \
     python3 python3-pip python-is-python3 \
+    xvfb x11vnc fluxbox novnc websockify \
     libatk-bridge2.0-0 libatk1.0-0 libcups2 libdbus-1-3 \
     libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
     libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 \
@@ -42,17 +43,20 @@ RUN pip install -r requirements-hcaptcha.txt \
 # 复制源码（含 hcaptcha solver）
 COPY . .
 
-RUN mkdir -p debug_screenshots product_files /tmp/hcaptcha_auto_solver_live
+RUN mkdir -p debug_screenshots product_files /tmp/hcaptcha_auto_solver_live \
+    && chmod +x docker_entrypoint.sh
 
 ENV NODE_ENV=production \
+    RUNNING_IN_DOCKER=1 \
     PORT=3000 \
     HEADFUL=0 \
     CDP_PORT=9222 \
     CDP_URL=http://127.0.0.1:9222
 
-EXPOSE 3000
+EXPOSE 3000 6080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:3000/api/public/runtime || exit 1
 
+ENTRYPOINT ["/app/docker_entrypoint.sh"]
 CMD ["node", "server.js"]

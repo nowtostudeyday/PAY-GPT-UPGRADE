@@ -31,6 +31,10 @@
 | 卡片供应商后台配置 | 页面管理 Webhook Secret | “系统配置”新增供应商配置区，可复制接收地址并保存/轮换 Webhook Secret。管理接口仅返回掩码状态，保存后新 Secret 立即用于验签和解密，无需重启服务。 |
 | 数据库兼容 | 启动时自动迁移 | 新数据库包含 `card_assets.decline_count` 与 `webhook_event_receipts`；已有数据库启动时自动补齐卡片字段、创建 Webhook 幂等记录表，并初始化相关配置。数据库账户需要具备 `ALTER TABLE` 和建表权限。 |
 | 会话认证代码 | Cookie 收集逻辑注释 | 为 Session Cookie 的清洗、去重、分块注入和 CSRF/设备 Cookie 补齐逻辑补充中文注释，便于排查会话注入问题。 |
+| 支付链接调试 | API 优先、UI 回退且付款前停止 | 后台支付链接调试与正式流程一致：优先创建 Checkout API，失败后才回退 UI 定价页；到 Checkout 最终“订阅/支付”按钮出现即停止，不会填卡、提交或扣款。 |
+| UI 套餐选择 | 稳定标识与 Pro 档位二次确认 | 定价页仅使用套餐按钮的稳定 `data-testid`；Pro 先选择 5x/20x，再在 Checkout 按 `chatgptprolite`/`chatgptpro` 确认实际档位。找不到唯一目标时直接失败，不会误选其他套餐。 |
+| UI 定价页就绪 | 等待套餐卡片后再切换地区 | 打开 `#pricing` 后固定等待 5 秒；确认套餐按钮已出现，并在切换地区前确认本次请求套餐对应按钮已就绪。未就绪时停止，不会把首页误当定价页反复切换地区。 |
+| Docker 调试 | 有头 Chromium 与本机 noVNC | `HEADFUL=1` 时容器启动 Xvfb、VNC 与 noVNC，可从本机查看浏览器；noVNC 默认仅监听 `127.0.0.1`，且必须设置 VNC 密码。 |
 
 ### 升级与回滚边界
 
@@ -140,6 +144,28 @@ docker compose up -d --build
 docker compose exec app bash
 ```
 
+#### Docker 有头调试（noVNC）
+
+在 `.env` 配置以下值后重建应用：
+
+```env
+HEADFUL=1
+VNC_PASSWORD=设置一个本地调试密码
+NOVNC_PORT=6080
+```
+
+```bash
+docker compose up -d --build app
+```
+
+打开 `http://localhost:6080/vnc.html`，输入 `VNC_PASSWORD` 后即可查看容器内 Chromium。noVNC 仅绑定 `127.0.0.1`；远程服务器请通过 SSH 隧道访问，勿直接暴露该端口。
+
+有头调试建议将 `BROWSER_POOL_SIZE=1`，避免多个 Chromium 窗口在同一桌面重叠。若 noVNC 页面不可用，先检查应用日志：
+
+```bash
+docker compose logs -f app
+```
+
 > **注意**：请勿使用 `docker compose down -v`，否则会删除 MySQL 数据卷。配置写入 MySQL 后，重启容器不会丢失。
 
 ---
@@ -162,6 +188,22 @@ https://kc.vpss.eu.cc/
 API Key 至少需要 `plans:read`、`balance:read`、`pay:write` Scope；如需使用任務查詢，另需 `tasks:read`。完整供應商協議見 [對接 API 文件](对接api.md)。
 
 > 瀏覽器池預設關閉（`BROWSER_POOL=0`）。第三方代充模式不使用本地瀏覽器開通流程。
+
+---
+
+## 支付链接调试与 UI 回退
+
+后台“支付链接调试”只用于核验 Session、套餐与 Checkout 页面是否能正常打开。它与正式充值使用相同的 Checkout 策略：`CHECKOUT_MODE=api` 时先调用 Checkout API；API 创建或验证失败时自动转入 UI 定价页流程。
+
+UI 回退流程会按以下顺序执行：
+
+1. 打开 ChatGPT 定价页，固定等待 5 秒，并确认套餐按钮实际出现。
+2. 切换到 Personal 视图和目标账单地区。
+3. 按稳定 `data-testid` 点击目标套餐：Plus 使用 `select-plan-button-plus-upgrade`；两个 Pro 套餐使用 `select-plan-button-pro-upgrade`。
+4. Pro 5x/20x 在定价页和 Checkout 分别确认对应档位，避免外层共用 Pro 按钮导致档位错误。
+5. 调试任务检测到 Checkout 最终“订阅/支付”按钮后立即停止；不会填写支付信息、点击订阅或产生扣款。
+
+如果定价页未展示本次请求套餐的唯一按钮，任务会报“定价页未展示套餐选择按钮”并停止；不会继续执行地区切换。该错误通常表示尚未进入定价弹窗、Session 状态失效或页面结构已变化。
 
 ---
 

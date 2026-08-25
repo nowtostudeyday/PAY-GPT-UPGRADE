@@ -127,7 +127,7 @@ function buildLaunchArgs(port) {
         '--disable-blink-features=AutomationControlled',
         `--remote-debugging-port=${port}`
     ];
-    if (process.env.HEADFUL !== '1') {
+    if (process.env.HEADFUL !== '1' || process.env.RUNNING_IN_DOCKER === '1') {
         args.push('--no-sandbox', '--disable-setuid-sandbox');
     }
     return args;

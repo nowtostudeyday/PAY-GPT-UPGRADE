@@ -54,6 +54,23 @@ const CONFIG = {
 const RECORD_VIDEO = String(process.env.RECORD_VIDEO || '1') !== '0';
 const VIDEO_DIR = path.join(__dirname, 'debug_screenshots', 'videos');
 const VIDEO_TAG = (process.env.JOB_KEY || process.env.CDK_CODE || `${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || `${Date.now()}`;
+const DEBUG_PAYMENT_BUTTON_PATTERNS = [/^Subscribe$/i, /^订阅$/, /^立即支付$/, /^Pay now$/i];
+
+const waitForDebugPaymentStep = async (page, timeout = 60000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        for (const pattern of DEBUG_PAYMENT_BUTTON_PATTERNS) {
+            const button = page.getByRole('button', { name: pattern });
+            const count = await button.count();
+            if (count === 1 && await button.isVisible({ timeout: 500 })) {
+                console.log(`✅ [调试] 已到达最终付款步骤，检测到提交按钮: ${pattern}`);
+                return;
+            }
+        }
+        await page.waitForTimeout(500);
+    }
+    throw new Error('调试未到达最终付款步骤：未检测到订阅/支付提交按钮');
+};
 
 function buildDebugScreenshotPath(prefix) {
     const subdir = process.env.CHECKOUT_DEBUG_ONLY === '1' ? 'checkout_debug' : 'activation';
@@ -482,7 +499,7 @@ async function run() {
         // --- Phase 1: Resolve payment parameters ---
         const debugOnly = process.env.CHECKOUT_DEBUG_ONLY === '1';
         if (debugOnly) {
-            console.log('[调试] 支付链接调试模式：浏览器注入 Session → Checkout API → 输出链接（不执行支付）');
+            console.log('[调试] 支付链接调试模式：浏览器注入 Session → API Checkout → 失败回退 UI → 到付款前停止');
         } else {
             console.log('[1] 准备自助充值流程...');
         }
@@ -536,14 +553,11 @@ async function run() {
                     country: billingCountry,
                     currency: billingCurrency,
                     planNameOverride,
-                    verifyPage: !debugOnly
+                    verifyPage: true
                 });
                 checkoutOpened = true;
             } catch (apiError) {
                 console.warn(`[Warn] API Checkout 失败: ${apiError.message}`);
-                if (debugOnly) {
-                    throw apiError;
-                }
                 if (checkoutMode === 'api') {
                     console.log('[Info] 正在回退到 UI 定价页流程...');
                 } else {
@@ -553,9 +567,6 @@ async function run() {
         }
 
         if (!checkoutOpened) {
-            if (debugOnly) {
-                throw new Error('API Checkout 失败，调试模式不启用 UI 定价页');
-            }
             console.log('🧭 [步骤] 正在打开定价页并选择升级套餐...');
             await openPricingCheckout(page, {
                 region: billingCountry,
@@ -565,6 +576,7 @@ async function run() {
         }
 
         if (debugOnly) {
+            await waitForDebugPaymentStep(page);
             const checkoutUrl = checkoutResult?.checkoutUrl || page.url();
             console.log(`🔗 [调试] 支付链接: ${checkoutUrl}`);
             console.log(`CHECKOUT_URL: ${checkoutUrl}`);
