@@ -79,8 +79,7 @@ async function createHostedCheckoutLink({ accessToken, planType = 'plus', planNa
         {
             headers: {
                 Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                Accept: 'application/json'
+                'Content-Type': 'application/json'
             },
             validateStatus: () => true,
             timeout: 30000
