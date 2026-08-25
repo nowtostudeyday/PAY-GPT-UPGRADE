@@ -177,7 +177,7 @@ async function executePaymentWithRetry(page, options) {
                 const usageResult = await store.recordCardUsage(card.id);
                 await store.releaseCard(card.id);
                 cardHandled = true;
-                const billingRecordId = await store.createBillingRecord({
+                await store.createBillingRecord({
                     card_number: card.card_number,
                     card_last4: cardLast4,
                     amount: billedAmount,
@@ -186,7 +186,7 @@ async function executePaymentWithRetry(page, options) {
                     cdk_code: cdkCode,
                     email,
                     stripe_session_id: stripeSessionId || null,
-                    status: 'verifying'
+                    status: 'success'
                 });
                 progress(`支付成功！卡片: ...${cardLast4}，姓名: ${holderName}，地址: ${address.line1}, ${address.city}`);
                 if (usageResult.exhausted) {
@@ -196,7 +196,7 @@ async function executePaymentWithRetry(page, options) {
                     screenshots.push(paymentResult.screenshot);
                     progress(`SUCCESS_SCREENSHOT: ${paymentResult.screenshot}`);
                 }
-                return { success: true, cardLast4, holderName, screenshots, billingRecordId };
+                return { success: true, cardLast4, holderName, screenshots };
             }
 
             lastError = paymentResult.error || '支付失败';

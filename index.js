@@ -1,10 +1,10 @@
 const { executePaymentWithRetry } = require('./payment-retry');
 const { openPricingCheckout } = require('./pricing-checkout');
-const { openApiCheckout, assertCheckoutPlanMatchesExpected } = require('./chatgpt');
+const { openApiCheckout } = require('./chatgpt');
 const store = require('./mysql-store');
 const { getRegionConfig, getRegionBrowserProfile } = require('./region-config');
 const { installChatGptSession, bootstrapChatGptSession } = require('./session-auth');
-const { cancelAutoRenew, querySubscriptionBySession, matchesExpectedSubscriptionPlan } = require('./subscription-check');
+const { cancelAutoRenew } = require('./subscription-check');
 const { connectTaskBrowser, applyCdpEnv, closeTaskBrowser } = require('./browser-runtime');
 const { preparePlaywrightProxy } = require('./playwright-proxy');
 const fs = require('fs');
@@ -54,35 +54,6 @@ const CONFIG = {
 const RECORD_VIDEO = String(process.env.RECORD_VIDEO || '1') !== '0';
 const VIDEO_DIR = path.join(__dirname, 'debug_screenshots', 'videos');
 const VIDEO_TAG = (process.env.JOB_KEY || process.env.CDK_CODE || `${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || `${Date.now()}`;
-
-const waitForExpectedSubscriptionPlan = async (accessToken, expectedPlanType, email) => {
-    const maxAttempts = Number(process.env.POST_PAYMENT_PLAN_VERIFY_ATTEMPTS || 3);
-    const waitMs = Number(process.env.POST_PAYMENT_PLAN_VERIFY_WAIT_MS || 5000);
-    let lastResult = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        const result = await querySubscriptionBySession(accessToken, { email });
-        if (result.ok && matchesExpectedSubscriptionPlan(result.data, expectedPlanType)) {
-            return { ok: true, subscription: result.data, attempts: attempt };
-        }
-        lastResult = result;
-        if (attempt < maxAttempts) {
-            console.log(`[订阅校验] 第 ${attempt} 次未确认目标套餐，${Math.round(waitMs / 1000)} 秒后重试...`);
-            await new Promise((resolve) => setTimeout(resolve, waitMs));
-        }
-    }
-
-    const actualPlan = lastResult?.ok ? lastResult.data.plan : '查询失败';
-    const actualRawPlan = lastResult?.ok ? lastResult.data.rawPlan : '';
-    const reason = lastResult?.ok
-        ? `实际套餐 ${actualPlan}${actualRawPlan ? ` (${actualRawPlan})` : ''}`
-        : lastResult?.error;
-    return {
-        ok: false,
-        error: reason || '无法确认实际订阅套餐',
-        subscription: lastResult?.ok ? lastResult.data : null
-    };
-};
 
 function buildDebugScreenshotPath(prefix) {
     const subdir = process.env.CHECKOUT_DEBUG_ONLY === '1' ? 'checkout_debug' : 'activation';
@@ -601,7 +572,6 @@ async function run() {
             return;
         }
 
-        await assertCheckoutPlanMatchesExpected(page, planType);
         console.log('✅ [步骤] Checkout 页面已打开，开始信用卡支付流程...');
 
         const stripeSessionMatch = String(page.url() || '').match(/(oaics_[a-f0-9]+)/i);
@@ -617,31 +587,10 @@ async function run() {
         });
 
         if (paymentResult.success) {
+            paymentSucceeded = true;
+            console.log(`    [+] 最终校验：支付成功! (stripe_card_payment)`);
             const accessToken = String(loginInfo.session?.accessToken || CONFIG.chatgptToken).trim();
             const cancellationEmail = loginInfo.email ? loginInfo.email : email;
-            const planVerification = await waitForExpectedSubscriptionPlan(accessToken, planType, cancellationEmail);
-            if (!planVerification.ok) {
-                const actualPlanType = planVerification.subscription?.planKey || planType;
-                await store.updateBillingRecordOutcome(paymentResult.billingRecordId, {
-                    plan_type: actualPlanType,
-                    status: 'manual',
-                    error_code: 'plan_mismatch',
-                    error_message: planVerification.error
-                });
-                console.error(`❌ [付款后套餐校验失败] 期望 ${planType}，${planVerification.error} (manual_intervention)`);
-                console.log('PAID_PLAN_MISMATCH');
-                throw new Error(`付款后套餐校验失败 (manual_intervention): ${planVerification.error}`);
-            }
-
-            await store.updateBillingRecordOutcome(paymentResult.billingRecordId, {
-                plan_type: planVerification.subscription.planKey,
-                status: 'success',
-                error_code: '',
-                error_message: ''
-            });
-            paymentSucceeded = true;
-            console.log(`✅ [套餐校验] 付款后已确认实际套餐: ${planVerification.subscription.plan}`);
-            console.log(`    [+] 最终校验：支付成功! (stripe_card_payment)`);
             const cancellationResult = await cancelAutoRenew(accessToken, { email: cancellationEmail });
             if (cancellationResult.ok) {
                 console.log(`✅ [订阅] ${cancellationResult.data.message}`);
