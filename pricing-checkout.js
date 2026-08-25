@@ -44,7 +44,7 @@ const REGION_CURRENT_COUNTRY_HINTS = {
 const SKIP_REGION_BUTTON_TEXT = /^(Upgrade|Personal|Business|Free|Plus|Pro|Subscribe|Close|Your current plan|升级|订阅|关闭)$/i;
 
 const PLAN_UPGRADE_PATTERNS = {
-    plus: [/升级至\s*Plus/i, /Upgrade to Plus/i, /Get Plus/i, /Subscribe to Plus/i, /^Upgrade$/i],
+    plus: [/升级至\s*Plus/i, /Upgrade to Plus/i, /Get Plus/i, /Subscribe to Plus/i, /重新加入\s*Plus/i],
     pro_5x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i],
     pro_20x: [/升级至\s*Pro/i, /Upgrade to Pro/i, /Get Pro/i, /^Upgrade$/i]
 };

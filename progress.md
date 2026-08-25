@@ -1,5 +1,17 @@
 
 
+## 2026-08-25 - Task: 修復 UI 定價頁 Plus 誤選套餐
+### What was done
+- 移除 Plus 流程的全頁通用 `Upgrade` 按鈕匹配，避免在定價頁新增 Go 等套餐後誤點第一個升級按鈕。
+- 新增「重新加入 Plus」按鈕文案匹配，適配目前中文定價頁的 Plus 卡片。
+### Testing
+- `node --check pricing-checkout.js` 通過。
+- `git diff --check` 通過。
+### Notes
+- 變更檔案：`pricing-checkout.js`、`progress.md`。
+- 回滾方式：還原上述兩個檔案；回滾後 Plus UI 流程會重新允許匹配全頁通用 `Upgrade` 按鈕。
+
+
 ## 2026-08-14 - Task: 修復 GPT 代充 API 協議代理傳參
 ### What was done
 - Session inspect 保留為不使用代理的本機格式／到期檢查。
